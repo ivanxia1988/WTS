@@ -1,14 +1,15 @@
 # Domi 原子能力说明：供 Skill 编排使用
 
-核对日期：2026-09-18。依据 Domi 当前客户端源码及本地 Root 工具注册整理，适用于普通 PC 的本地优先会话。具体工具是否可用，以当前运行时注入的工具清单、参数 schema 和后端启用配置为准。
+核对日期：2026-09-22。依据 Domi 当前客户端源码及本地 Root 工具注册整理，适用于普通 PC 的本地优先会话。具体工具是否可用，以当前运行时注入的工具清单、参数 schema 和后端启用配置为准。
 
-导航：[运行模型](#运行模型) · [浏览器](#浏览器能力) · [联网](#联网查询) · [澄清](#用户澄清与确认) · [文件与执行](#文件文档与本地执行) · [记忆与业务能力](#记忆子任务与云端业务能力) · [编排建议](#skill-编排建议) · [源码依据](#源码依据)
+导航：[运行模型](#运行模型) · [浏览器](#浏览器能力) · [联网](#联网查询) · [澄清](#用户澄清与确认) · [文件与执行](#文件文档与本地执行) · [本机简历检索](#本机简历检索) · [记忆与业务能力](#记忆子任务与云端业务能力) · [编排建议](#skill-编排建议) · [源码依据](#源码依据)
 
 ## 运行模型
 
 ```text
 用户 → 本地 Root → Skill 的步骤与决策
                     ├─ 文件、文档、本地脚本
+                    ├─ 本机简历索引检索（search_local_resumes）
                     ├─ Electron 内置浏览器 → 页面插件
                     ├─ 用户澄清卡片 → 暂停并恢复原任务
                     └─ 联网搜索 / 已启用的云端业务 Agent
@@ -25,6 +26,7 @@ Skill 提供领域规则、参数组织、流程与必要脚本；Domi 提供真
 | 用户澄清与确认 | `request_user_input` | Domi 的人机交互中间件与前端卡片 |
 | 文件读写与搜索 | `ls/read_file/write_file/edit_file/glob/grep` | 当前工作区和文件权限允许 |
 | 文档文本提取 | `extract_document_text` | 本地文件及对应解析依赖可用 |
+| 本机简历检索 | `search_local_resumes` | 已在「整理简历」添加来源并完成索引；本地检索桥与登录会话可用 |
 | 本地命令 | `execute` | 运行时启用了 Shell；使用其托管环境和权限 |
 | 记忆 | `search_local_memory/expand_local_memory/save_user_profile` | 当前用户的本地记忆上下文可用 |
 | 子任务 | `task` | 实际清单提供对应子 Agent；子 Agent 工具不一定与 Root 相同 |
@@ -223,6 +225,31 @@ Skill 脚本适合确定性计算、结构转换、校验和报告数据整理�
 
 用户明确要求阅读、总结本地文件时使用。以人找岗、推荐报告、接单推荐等云端任务由其工具解析附件，不先在本地把简历全文提取后重新拼进请求。
 
+## 本机简历检索
+
+工具：`search_local_resumes(keyword, match_mode, limit, offset, file_types, folder_path)`。经 Electron 注册的本机回环桥检索用户此前通过「整理简历」建立的本机索引，返回简历正文详情、文件路径与分页信息。
+
+- `keyword`：1–8 个空格分隔的关键词，字面关键词检索，不支持自然语言条件或布尔表达式；`match_mode` 为 `all`（各词同时匹配，默认）或 `any`。
+- `limit`：每页 1–20 条（默认 10）；`offset` 仅在确有需要且 `has_more=true` 时使用结果返回的 `next_offset` 翻页。
+- `file_types`：可选 `pdf/doc/docx/xls/xlsx`，空列表搜索全部；Word 简历用 `doc/docx`，Excel 台账用 `xls/xlsx`。
+- `folder_path`：可选的已索引根目录完整路径，必须来自用户或已有结果的 `root_path`，不猜测路径。
+
+```json
+{"keyword":"Python 上海","match_mode":"all","limit":10,"file_types":["pdf","docx"]}
+```
+
+这是 `search_local_resumes` 的参数模板。返回条目带 `resume_detail.units[].content` 等正文详情（PDF/Word 附页码，Excel 附工作表名和行号），可直接阅读，不必为了正文再次逐文件调用工具；只有详情缺失、`truncated=true` 或需要最新原文时才按 `file_path` 读取原文件。详情有返回长度上限，未返回的部分不能当作不存在。Excel 的 `matched_rows` 仅保证每行命中至少一个词，`preview_rows` 是未命中正文时的台账预览；逐行核对条件和列含义，不把不同候选人的信息合并。
+
+边界与限制：
+
+- 只查已建立的索引：不扫描新目录、不上传文件，也不是禾蛙云端人才库；结果只反映本机已整理的简历与 Excel 人才台账。
+- 查询串行执行，两次查询开始间隔不少于 1 秒；避免重复相同查询、轮询和无目的地遍历全库，不通过子 Agent/Shell 绕过频率限制。
+- 大库查询、索引正文读取及首次索引准备会消耗 CPU 和磁盘 I/O，可能耗时数秒或更久；遇到繁忙或超时不要立即重试。
+
+失败时返回 `code`、`message`、`next_action` 和 `agent_guidance`，必须据此区分状态：`LIBRARY_NOT_CONFIGURED` 表示尚未添加简历来源——明确告知用户还没有可搜索的已整理简历，引导其点击左侧「整理简历」添加 PDF/Word 简历目录或 Excel 人才台账，等整理完成后再搜索，此时停止继续搜索；`SEARCH_SCOPE_NOT_CONFIGURED` 表示 `folder_path` 不是已添加的根目录，需核对路径；`RESUME_INDEXING`、`RESUME_INDEX_FAILED`、`RESUME_SOURCES_UNAVAILABLE`、`RESUME_INDEX_NOT_READY`、`NO_SEARCHABLE_RESUMES` 分别对应整理中、整理失败、来源失效、尚未完成整理与没有成功索引的文件，按 `next_action` 引导处理。`NO_MATCHES` 仅表示本次条件无匹配，不能说用户没整理简历；`search_performed=false` 表示尚未执行关键词检索；`coverage_warning` 非空时说明覆盖不完整；连接、超时和限频类错误不要连续重试。技术详情仅用于定位，不必原样堆给用户。
+
+该工具与文件、脚本工具同属本地能力，供 Skill 编排本机人才检索类流程时使用；搜索结果同样受用户登录身份隔离。
+
 ## 记忆、子任务与云端业务能力
 
 | 入口 | 当前用途及边界 |
@@ -258,7 +285,7 @@ Skill 脚本适合确定性计算、结构转换、校验和报告数据整理�
 
 ## 源码依据
 
-以下路径相对 `hewa-domi-app/`，用于维护者后续核对；本文不复制宿主实现。本文覆盖的宿主代码以 2026-09-18 工作区为准，WTS 最近代码提交为 `ee5675d`。
+以下路径相对 `hewa-domi-app/`，用于维护者后续核对；本文不复制宿主实现。本文覆盖的宿主代码以 2026-09-22 工作区为准；WTS 技能仓库最近提交为 `ee5675d`，其后的技能改动在本地完成、尚未提交，快照见 `source/`。本机简历检索工具对应提交 `4a0a1140`。
 
 | 主题 | 源码入口 |
 | --- | --- |
@@ -272,6 +299,7 @@ Skill 脚本适合确定性计算、结构转换、校验和报告数据整理�
 | 澄清表单与本地恢复 | `python/tools/user_input.py`、`python/deepagent_runtime_support/user_input_contract.py`、`local_user_input.py` |
 | 文件与命令约定 | `python/deepagent_runtime_support/harness_prompts.py`、`config.py`、`workspace.py` |
 | 文档提取 | `python/tools/document_extract.py` |
+| 本机简历检索工具与检索桥 | `python/deepagent_runtime_support/local_resume_search.py`、`electron/service/resumeScanner/agentSearchBridge.js`、`agentSearchDetails.js`、`queryWorker.js` |
 | 记忆工具与云端业务调用 | `python/deepagent_runtime_support/memory_tools.py`、`cloud_tools.py` |
 | 跨端机器契约 | `contracts/domi-local-first-v1.contract.json` |
 

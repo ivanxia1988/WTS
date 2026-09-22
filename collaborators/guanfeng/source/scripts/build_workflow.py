@@ -17,7 +17,7 @@ from decision_basis import decision_receipt
 
 
 SKILL_NAME = "wts"
-SKILL_VERSION = "0.5.0"
+SKILL_VERSION = "0.5.2"
 WORKFLOW_SCHEMA = "browser.workflow.v1"
 SCHEMA_VERSION = 2
 MAX_SEARCH_ITERATION = 5
@@ -75,6 +75,9 @@ JOB_HOP_FREQUENCY = {
     "last_3_years_max_2",
     "recent_2_jobs_min_2_years_each",
 }
+GENDER_CHOICES = {"male", "female", "男", "女"}
+AGE_MIN = 16
+AGE_MAX = 60
 SITE_EXPERIENCE_PRESETS = {(0, 0), (1, 3), (3, 5), (5, 10), (10, None)}
 ALLOWED_SITE_FILTER_KEYS = {
     "current_cities",
@@ -84,6 +87,10 @@ ALLOWED_SITE_FILTER_KEYS = {
     "school_requirements",
     "company",
     "work_content",
+    "activity_recency",
+    "job_hop_frequency",
+    "age_range",
+    "gender",
 }
 ALLOWED_HARD_FILTER_KEYS = {
     "current_cities",
@@ -110,7 +117,7 @@ ALLOWED_PLAN_KEYS = {
     "decision_basis",
 }
 ALLOWED_SEMANTIC_KEYS = {"must_have", "nice_to_have", "exclude_signals"}
-SENSITIVE_PLAN_FIELDS = {"age_range", "activity_recency", "job_hop_frequency"}
+SENSITIVE_PLAN_FIELDS = {"age_range", "gender"}
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -230,10 +237,10 @@ def normalize_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str,
     site_filters = dict(plan.get("site_filters") or {})
     hard_filters = dict(plan.get("hard_filters") or {})
 
-    sensitive = sorted((set(site_filters) | set(hard_filters)) & SENSITIVE_PLAN_FIELDS)
-    if sensitive:
+    sensitive_hard = sorted(set(hard_filters) & SENSITIVE_PLAN_FIELDS)
+    if sensitive_hard:
         raise ValueError(
-            "年龄、活跃度、跳槽频率不参与检索、站内筛选或硬筛: " + ", ".join(sensitive)
+            "年龄、性别不参与硬筛或评分，仅可作为站内筛选: " + ", ".join(sensitive_hard)
         )
     unknown_site = sorted(set(site_filters) - ALLOWED_SITE_FILTER_KEYS)
     if unknown_site:
@@ -241,16 +248,57 @@ def normalize_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str,
     unknown_hard = sorted(set(hard_filters) - ALLOWED_HARD_FILTER_KEYS)
     if unknown_hard:
         raise ValueError(f"hard_filters 包含未知字段: {', '.join(unknown_hard)}")
-    for field in ("company", "work_content"):
-        if field in site_filters:
+    if "work_content" in site_filters:
+        site_filters.pop("work_content")
+        warnings.append(
+            {
+                "field": "site_filters.work_content",
+                "code": "SITE_FILTER_UNSUPPORTED",
+                "message": "猎聘页面无该站内筛选项，已跳过页面筛选；同名字段请写入 hard_filters 做文本硬筛",
+            }
+        )
+
+    if "company" in site_filters:
+        site_filters["company"] = normalize_string_list(
+            site_filters["company"], "site_filters.company", maximum=1
+        )
+
+    for field, allowed in (
+        ("activity_recency", ACTIVITY_RECENCY),
+        ("job_hop_frequency", JOB_HOP_FREQUENCY),
+    ):
+        if field not in site_filters:
+            continue
+        value = site_filters[field]
+        if value is None or (isinstance(value, str) and not value.strip()):
             site_filters.pop(field)
-            warnings.append(
-                {
-                    "field": f"site_filters.{field}",
-                    "code": "SITE_FILTER_UNSUPPORTED",
-                    "message": "猎聘页面无该站内筛选项，已跳过页面筛选；同名字段请写入 hard_filters 做文本硬筛",
-                }
+            continue
+        if not isinstance(value, str) or value.strip() not in allowed:
+            raise ValueError(
+                f"site_filters.{field} 必须是单个预设字符串: {', '.join(sorted(allowed))}；不限时省略字段"
             )
+        site_filters[field] = value.strip()
+
+    if "gender" in site_filters:
+        gender_value = site_filters["gender"]
+        if gender_value is None or (
+            isinstance(gender_value, str) and not gender_value.strip()
+        ):
+            site_filters.pop("gender")
+        else:
+            if not isinstance(gender_value, str) or gender_value.strip() not in GENDER_CHOICES:
+                raise ValueError(
+                    "site_filters.gender 必须是单个值: male, female, 男, 女；不限时省略字段"
+                )
+            site_filters["gender"] = gender_value.strip()
+
+    if "age_range" in site_filters:
+        site_filters["age_range"] = normalize_range(
+            site_filters["age_range"],
+            "site_filters.age_range",
+            minimum_allowed=AGE_MIN,
+            maximum_allowed=AGE_MAX,
+        )
 
     for field in ("current_cities", "expected_cities"):
         if field in site_filters:
@@ -500,7 +548,7 @@ def map_filter_value(field: str, value: Any, channel: dict[str, Any]) -> Any:
     if field in ("education", "school_requirements"):
         mapping = mappings.get(field, {})
         return [mapping.get(item, item) for item in value]
-    if field in ("activity_recency", "job_hop_frequency"):
+    if field in ("activity_recency", "job_hop_frequency", "gender"):
         mapping = mappings.get(field, {})
         return mapping.get(value, value)
     return copy.deepcopy(value)
@@ -512,6 +560,152 @@ def locator_within(locator: dict[str, Any], within: dict[str, Any]) -> dict[str,
     result.setdefault("visible", True)
     result.setdefault("enabled", True)
     return result
+
+
+def require_unique_filter_targets(
+    step_id: str, targets: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    # Compiled page programs otherwise use the first match. Reject ambiguous
+    # rows/options before a click rather than depending on DOM order.
+    return [
+        {
+            "id": f"count-{step_id}",
+            "op": "page.extract",
+            "schema": {"fields": {
+                name: {"source": "count", "locator": target}
+                for name, target in targets.items()
+            }},
+            "save_as": "filter_matches",
+        },
+        {
+            "id": f"require-unique-{step_id}",
+            "op": "page.wait",
+            "until": {"all": [
+                {"type": "variable", "path": f"filter_matches.{name}", "value": 1}
+                for name in targets
+            ]},
+            "timeout_ms": 100,
+        },
+    ]
+
+
+def compile_company_filter_program(
+    value: str, config: dict[str, Any], channel: dict[str, Any], action_delay_ms: int
+) -> list[dict[str, Any]]:
+    control_timeout = channel["timing"]["control_timeout_ms"]
+    row = config["row"]
+    company_input = locator_within(config["input"], row)
+    option = {
+        **locator_within(config["option"], config["dropdown"]),
+        "text": {"equals": value},
+    }
+    confirm = locator_within(config["confirm"], row)
+    selected = {
+        "any": [
+            {
+                "type": "exists",
+                "target": {
+                    **locator_within(config["selected"], row),
+                    "text": {"equals": value},
+                },
+            },
+            {
+                "all": [
+                    {"type": "value", "target": company_input, "value": value},
+                    {
+                        "type": "attribute",
+                        "target": company_input,
+                        "attribute": "aria-expanded",
+                        "value": "false",
+                    },
+                ]
+            },
+        ]
+    }
+
+    def wait(step_id: str, condition: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": f"wait-company-{step_id}",
+            "op": "page.wait",
+            "until": condition,
+            "timeout_ms": control_timeout,
+        }
+
+    return [
+        wait("input", {"type": "exists", "target": company_input}),
+        *require_unique_filter_targets("company-control", {"row": row, "input": company_input}),
+        {
+            "id": "focus-company-input",
+            "op": "page.click",
+            "target": company_input,
+            "after_ms": action_delay_ms,
+        },
+        {
+            "id": "fill-company-input",
+            "op": "page.fill",
+            "target": company_input,
+            "value": value,
+            "events": ["input", "change"],
+            "after_ms": action_delay_ms,
+        },
+        {
+            "id": "read-company-list-id",
+            "op": "page.extract",
+            "schema": {"fields": {"list_id": {
+                "source": "attribute",
+                "locator": company_input,
+                "attribute": "aria-controls",
+                "strategies": [{"attribute": "aria-owns"}],
+                "transforms": [{"type": "regex_capture", "pattern": "^([A-Za-z0-9_-]+)$"}],
+                "required": True,
+            }}},
+            "save_as": "company_control",
+        },
+        wait("suggestion", {"type": "exists", "target": option}),
+        *require_unique_filter_targets("company-suggestion", {"option": option}),
+        {
+            "id": "select-company-suggestion",
+            "op": "page.click",
+            "target": option,
+            "after_ms": action_delay_ms,
+        },
+        wait("selected", selected),
+        {
+            "id": "activate-company-confirm",
+            "op": "page.click",
+            "target": company_input,
+            "after_ms": action_delay_ms,
+        },
+        wait("confirm", {"type": "exists", "target": confirm}),
+        *require_unique_filter_targets("company-confirm", {"button": confirm}),
+        {
+            "id": "confirm-filter-company",
+            "op": "page.click",
+            "target": confirm,
+            "after_ms": action_delay_ms,
+        },
+        {
+            **wait("applied", {"all": [
+                selected,
+                {
+                    "type": "exists",
+                    "target": {
+                        "any_css": channel["selectors"]["submitted_filter_chips"],
+                        "text": {"equals": value},
+                        "visible": True,
+                    },
+                },
+                {"url_contains": ["#session"]},
+                {"none_visible": channel["selectors"]["loading"]},
+                {"any": [
+                    {"any_visible": channel["selectors"]["candidate_rows"]},
+                    {"any_visible": channel["selectors"]["empty_results"]},
+                    {"text_any": channel["text_markers"]["no_results"]},
+                ]},
+            ]}),
+            "timeout_ms": channel["timing"]["search_timeout_ms"],
+        },
+    ]
 
 
 def compile_site_filter_program(
@@ -640,6 +834,11 @@ def compile_site_filter_program(
                     *stable_waits(field),
                 ]
             )
+        elif interaction == "company_autocomplete":
+            operations.extend(
+                compile_company_filter_program(value[0], config, channel, action_delay_ms)
+            )
+            operations.extend(stable_waits(field))
         elif interaction == "inline_option":
             label = value[0] if isinstance(value, list) else value
             operations.extend(
@@ -657,25 +856,77 @@ def compile_site_filter_program(
                 ]
             )
         elif interaction == "select_dropdown":
+            row = {**config["row"], "visible": True}
+            trigger = locator_within(config["trigger"], row)
+            dropdown = {
+                "any_css": selectors["select_dropdowns"],
+                "text": {"contains": value},
+                "visible": True,
+            }
+            option = {
+                "any_css": selectors["select_options"],
+                "within": dropdown,
+                "text": {"equals": value},
+                "visible": True,
+                "enabled": True,
+            }
             operations.extend(
                 [
                     {
+                        "id": f"wait-filter-{field}-trigger",
+                        "op": "page.wait",
+                        "until": {"type": "exists", "target": trigger},
+                        "timeout_ms": channel["timing"]["control_timeout_ms"],
+                    },
+                    *require_unique_filter_targets(
+                        f"{field}-control", {"row": row, "trigger": trigger}
+                    ),
+                    {
                         "id": f"open-filter-{field}",
                         "op": "page.click",
-                        "target": locator_within(config["trigger"], config["row"]),
+                        "target": trigger,
                         "after_ms": action_delay_ms,
                     },
                     {
+                        "id": f"wait-filter-{field}-options",
+                        "op": "page.wait",
+                        "until": {"type": "exists", "target": option},
+                        "timeout_ms": channel["timing"]["control_timeout_ms"],
+                    },
+                    *require_unique_filter_targets(
+                        f"{field}-option", {"dropdown": dropdown, "option": option}
+                    ),
+                    {
                         "id": f"select-filter-{field}",
                         "op": "page.click",
-                        "target": {
-                            "any_css": selectors["select_options"],
-                            "within": {"any_css": selectors["select_dropdowns"], "visible": True},
-                            "text": {"equals": value},
-                            "visible": True,
-                            "enabled": True,
-                        },
+                        "target": option,
                         "after_ms": action_delay_ms,
+                    },
+                    {
+                        "id": f"verify-filter-{field}-applied",
+                        "op": "page.wait",
+                        "until": {"all": [
+                            {"not": {"type": "exists", "target": dropdown}},
+                            {
+                                "type": "exists",
+                                "target": {**trigger, "text": {"equals": value}},
+                            },
+                            {
+                                "type": "exists",
+                                "target": {
+                                    "any_css": selectors["submitted_filter_chips"],
+                                    "text": {"equals": value},
+                                    "visible": True,
+                                },
+                            },
+                            {"none_visible": selectors["loading"]},
+                            {"any": [
+                                {"any_visible": selectors["candidate_rows"]},
+                                {"any_visible": selectors["empty_results"]},
+                                {"text_any": channel["text_markers"]["no_results"]},
+                            ]},
+                        ]},
+                        "timeout_ms": channel["timing"]["search_timeout_ms"],
                     },
                     *stable_waits(field),
                 ]

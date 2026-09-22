@@ -109,16 +109,63 @@ N 是最后完成的轮次（1–5），不是下一轮；第 5 轮后仍填 5�
 - `experience_years`: 仅支持 `{min:0,max:0}`、`{min:1,max:3}`、`{min:3,max:5}`、`{min:5,max:10}`、`{min:10,max:null}`。
 - `education`: 最多一个值，支持本科、硕士、博士/博士后、大专、中专/中技、高中及以下。
 - `school_requirements`: 最多一个值，支持 `211`、`985`、`double_first_class`、`overseas`。
+- `company`: 最多一个公司名称关键词的字符串数组，例如 `["字节"]`。仅使用用户已确认的名称；公司为硬条件时，同时写入 `hard_filters.company`。
+- `activity_recency`、`job_hop_frequency`: 单个预设字符串，见下方映射；未指定或不限时省略。只用于站内筛选，不支持放入 `hard_filters`。
 
 策略允许写入但页面没有控件的字段：
 
-- `company`、`work_content`: 写入 `site_filters` 时 Builder 会记 `SITE_FILTER_UNSUPPORTED` 并跳过页面筛选；请同时写入 `hard_filters` 做文本硬筛。
+- `work_content`: 写入 `site_filters` 时 Builder 会记 `SITE_FILTER_UNSUPPORTED` 并跳过页面筛选；请同时写入 `hard_filters` 做文本硬筛。
 
-不要写入 `age_range`、`activity_recency`、`job_hop_frequency`。年龄、活跃度、跳槽频率不参与检索或硬筛。
+- `age_range`：`{min,max}` 整数对象，边界取 16-60，至少给一个边界（如 `{min:25,max:35}`、`{min:28,max:null}`）。仅用于站内筛选，不得写入 `hard_filters`。
+- `gender`：单个值，支持 `male`、`female` 或中文 `男`、`女`；不限时省略字段。仅用于站内筛选，不得写入 `hard_filters`。
 
-站内筛选只能使用猎聘支持的离散预设。Selector、控件定位、弹窗交互和取值标签由 Skill 渠道资产维护，计划中不得出现 Selector 或点击步骤。不要为了表达 `0-3 年` 等精确范围而选近似预设；把精确条件保留在 `hard_filters`。若站内工作年限不是受支持的预设，Builder 只会在 `hard_filters` 存在完全相同范围时移除该站内条件并返回 warning，否则拒绝计划。
+年龄、性别只能作为站内筛选缩小召回范围，不参与硬筛、评分或排序；这两个条件没有本地硬筛回退，页面操作失败时按 `unsupported_filters` 报告未验证，不得当作已满足。
 
-所有站内筛选都采用“失败后继续并上报”：某个字段的页面操作失败时跳过该字段、继续关键词搜索，并把字段、请求值和错误原因写入对应路径的 `search.<path>.unsupported_filters`。站内筛选只是缩小召回范围；同字段若属于硬条件，仍由后续卡片和详情 `data.filter` 执行。计划不再需要 `allow_partial_filters`。
+除公司联想输入外，站内筛选使用猎聘支持的离散预设。Selector、控件定位、弹窗交互和取值标签由 Skill 渠道资产维护，计划中不得出现 Selector 或点击步骤。不要为了表达 `0-3 年` 等精确范围而选近似预设；把精确条件保留在 `hard_filters`。若站内工作年限不是受支持的预设，Builder 只会在 `hard_filters` 存在完全相同范围时移除该站内条件并返回 warning，否则拒绝计划。
+
+所有站内筛选都采用“失败后继续并上报”：某个字段的页面操作失败时跳过该字段、继续后续搜索，并把字段、请求值和错误原因写入对应路径的 `search.<path>.unsupported_filters`。站内筛选只是缩小召回范围；同字段若有受支持的硬条件，仍由后续卡片和详情 `data.filter` 执行。活跃度、跳槽频率没有自动硬筛回退，失败记录的 `context.hard_filter_fallback` 为 false，必须说明条件未验证，不能把结果当作已满足该条件。计划不再需要 `allow_partial_filters`。
+
+### 活跃度与跳槽频率
+
+仅在用户明确指定时填写，不根据岗位名称、默认排除信号或模型偏好自行添加。“近 1 年内多次跳槽”与下面的站点预设含义不同，不能自动替换。
+
+| 字段 | 计划值 | 页面选项 |
+| --- | --- | --- |
+| `activity_recency` | `today` | 今天活跃 |
+| `activity_recency` | `within_3_days` | 3天内活跃 |
+| `activity_recency` | `within_7_days` | 7天内活跃 |
+| `activity_recency` | `within_30_days` | 30天内活跃 |
+| `activity_recency` | `within_3_months` | 最近三个月活跃 |
+| `activity_recency` | `within_6_months` | 最近半年活跃 |
+| `activity_recency` | `within_1_year` | 最近一年活跃 |
+| `job_hop_frequency` | `last_5_years_max_3` | 近5年不超过3段 |
+| `job_hop_frequency` | `last_3_years_max_2` | 近3年不超过2段 |
+| `job_hop_frequency` | `recent_2_jobs_min_2_years_each` | 近2段均不低于2年 |
+
+例如用户明确要求“3 天内活跃、近 3 年不超过 2 段”时，合并进当前计划的筛选部分：
+
+```json
+{
+  "site_filters": {
+    "activity_recency": "within_3_days",
+    "job_hop_frequency": "last_3_years_max_2"
+  }
+}
+```
+
+两项都是自定义下拉：先按“活跃度”或“跳槽频率”所在筛选行定位唯一触发器，再展开、等待可见 portal 浮层，只在唯一浮层内点击文本完全相同的唯一选项。点选即提交，不增加“确定”步骤。点击后同时检查下拉收起、框内显示所选值、底部筛选标签出现、结果加载结束，再等待列表稳定；人数可以不变，零结果也有效。
+
+`locator: null` 只表示快照没有给出推荐定位，不等于 DOM 无法通过 CSS 查询；portal 也不必然意味着不在可访问性树中。Builder 复用渠道资产中的 DOM 选择器，不依赖快照是否列出了菜单项。每步重新解析定位；不保存本轮 ref、`rc_select_x` 序号或截图坐标。定位缺失、歧义或验证超时时报告筛选降级，不用历史坐标重试。
+
+### 公司名称筛选
+
+公司名称是 Ant Design combobox，视觉上的“搜索公司”不是可靠的 input placeholder，不能用 textbox 或该 placeholder 定位。实测的 `#rc_select_4` 仅对当时页面有效；运行时编号会漂移，也不代表视觉顺序，不得固化编号或按第几个 combobox 猜测公司框。
+
+Builder 在带“公司名称”文案的筛选行内定位唯一的 `input[role='combobox']`，输入后读取当前控件的 `aria-controls`（兼容 `aria-owns`），仅在关联的 portal 下拉框内选择文本完全相同的唯一候选。不会全页点击同名文本、复用旧 ref/坐标或盲选第一个公司；没有精确候选或定位有歧义时记录筛选降级。
+
+固定流程：聚焦并输入 → 等待联想 → 点击同名候选 → 确认框内已选公司 → 再激活公司框 → 点击该行的“确 定” → 检查框内公司、底部已提交筛选标签、URL 包含 `#session`，并等待结果加载结束及列表稳定。仅填入文本不算生效。`#session` 可能在前面的关键词搜索后就已存在，结果人数也可能不变，不能把这两项单独当成公司筛选成功的依据；零结果是有效结果，不要求“3000+”。
+
+现有实测只覆盖单公司，尚未确认页面的多公司 OR 行为，因此 `site_filters.company` 最多一个值。用户要求多公司任一背景时，完整名单写入 `hard_filters.company`，省略站内公司条件；只有用户明确要求限定单一公司时才缩窄页面范围。公司类型或偏好不转换成未确认的公司名。
 
 ## 硬性过滤字段
 
@@ -136,7 +183,7 @@ N 是最后完成的轮次（1–5），不是下一轮；第 5 轮后仍填 5�
 
 卡片上能够明确读到的城市、学历、工作年限等字段可以直接淘汰不符合者。列表摘要没有出现关键词、院校标签或其他可能被页面折叠的信息时只记为 `unknown`，不得提前淘汰。Builder 为卡片和详情分别生成声明式谓词；通用浏览器不理解招聘字段。
 
-用户或 JD 明确声明为硬性的站内条件必须同步写入 `hard_filters`。不要假设站内筛选等同于最终硬筛。
+用户或 JD 明确声明为硬性、且属于上述支持字段的站内条件必须同步写入 `hard_filters`。活跃度、跳槽频率当前只有站内预设，不能写入未知硬筛字段或把页面失败包装为硬筛通过。不要假设站内筛选等同于最终硬筛。
 
 ## 结果分区
 
