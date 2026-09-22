@@ -1,0 +1,4 @@
+interface:
+  display_name: "猎聘智能寻访"
+  short_description: "根据职位描述生成猎聘搜索工作流并精筛候选人名单"
+  default_prompt: "使用 $wts 根据这份 JD 在猎聘寻找合适候选人。"

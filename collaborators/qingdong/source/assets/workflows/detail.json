@@ -1,0 +1,43 @@
+{
+  "program": [
+    {
+      "id": "detect-detail-page",
+      "op": "page.detect",
+      "rules": {"$channel": "page_detection"},
+      "timeout_ms": {"$channel": "timing.detail_timeout_ms"},
+      "fail_if_unmatched": true,
+      "save_as": "detail.page_state"
+    },
+    {
+      "id": "wait-detail-stable",
+      "op": "page.wait",
+      "until": {
+        "all": [
+          {"any_visible": {"$channel": "selectors.detail_root"}},
+          {"any_visible": {"$channel": "selectors.detail_basic"}},
+          {"none_visible": {"$channel": "selectors.loading"}}
+        ]
+      },
+      "timeout_ms": {"$channel": "timing.detail_timeout_ms"}
+    },
+    {"$generated": "detail_browse_program"},
+    {
+      "id": "stabilize-detail",
+      "op": "page.wait",
+      "until": {
+        "type": "dom_stable",
+        "target": {"any_css": {"$channel": "selectors.detail_root"}},
+        "stable_ms": {"$channel": "timing.stable_window_ms"}
+      },
+      "timeout_ms": {"$channel": "timing.detail_timeout_ms"}
+    },
+    {
+      "id": "extract-detail",
+      "op": "page.extract",
+      "root": {"$schema": "detail.root"},
+      "schema": {"$schema": "detail"},
+      "save_as": "detail.current"
+    }
+  ],
+  "return": {"$ref": "detail.current"}
+}

@@ -1,0 +1,36 @@
+{
+  "workflow_type": "candidate.preflight",
+  "required_capabilities": ["page.run.v1", "human.takeover.v1"],
+  "steps": [
+    {
+      "id": "open-channel-search",
+      "action": "page.navigate",
+      "url": {"$channel": "urls.search"},
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "id": "detect-channel-page",
+      "action": "page.run",
+      "program": [
+        {
+          "id": "detect-page-state",
+          "op": "page.detect",
+          "rules": {"$channel": "page_detection"},
+          "timeout_ms": {"$channel": "timing.search_timeout_ms"},
+          "fail_if_unmatched": true,
+          "save_as": "preflight.page_state"
+        }
+      ],
+      "return": {"page_state": {"$ref": "preflight.page_state"}},
+      "output": {"save_as": "preflight"}
+    },
+    {
+      "id": "emit-preflight-result",
+      "action": "result.emit",
+      "value": {
+        "summary": {"workflow": "preflight", "channel_ready": true},
+        "page_state": {"$context": "preflight.page_state"}
+      }
+    }
+  ]
+}

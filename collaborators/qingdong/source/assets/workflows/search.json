@@ -1,0 +1,370 @@
+{
+  "workflow_type": "candidate.search",
+  "required_capabilities": [
+    "page.run.v1",
+    "data.filter.v1",
+    "tabs.foreach.v1",
+    "human.takeover.v1"
+  ],
+  "path_steps": [
+    {
+      "id": "open-channel-search",
+      "action": "page.navigate",
+      "url": {"$channel": "urls.search"},
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "id": "search-and-extract-cards",
+      "action": "page.run",
+      "program": [
+        {
+          "id": "detect-search-page",
+          "op": "page.detect",
+          "rules": {"$channel": "page_detection"},
+          "timeout_ms": {"$channel": "timing.search_timeout_ms"},
+          "fail_if_unmatched": true,
+          "save_as": "search.page_state"
+        },
+        {
+          "id": "wait-search-controls",
+          "op": "page.wait",
+          "until": {
+            "all": [
+              {"any_visible": {"$channel": "selectors.keyword_inputs"}},
+              {"any_visible": {"$channel": "selectors.search_buttons"}},
+              {"none_visible": {"$channel": "selectors.loading"}}
+            ]
+          },
+          "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+        },
+        {
+          "id": "fill-keyword",
+          "op": "page.fill",
+          "target": {"any_css": {"$channel": "selectors.keyword_inputs"}, "visible": true, "enabled": true},
+          "value": {"$generated": "keyword_text"},
+          "events": ["input", "change"]
+        },
+        {
+          "id": "submit-keyword",
+          "op": "page.click",
+          "target": {"any_css": {"$channel": "selectors.search_buttons"}, "visible": true, "enabled": true},
+          "after_ms": {"$generated": "action_delay_ms"}
+        },
+        {
+          "id": "wait-keyword-results",
+          "op": "page.wait",
+          "until": {
+            "all": [
+              {"none_visible": {"$channel": "selectors.loading"}},
+              {
+                "any": [
+                  {"any_visible": {"$channel": "selectors.candidate_rows"}},
+                  {"any_visible": {"$channel": "selectors.empty_results"}},
+                  {"text_any": {"$channel": "text_markers.no_results"}}
+                ]
+              }
+            ]
+          },
+          "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+        },
+        {
+          "id": "stabilize-keyword-results",
+          "op": "page.wait",
+          "until": {
+            "type": "dom_stable",
+            "target": {"any_css": {"$channel": "selectors.result_roots"}},
+            "stable_ms": {"$channel": "timing.stable_window_ms"}
+          },
+          "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+        },
+        {
+          "id": "initialize-unsupported-filter-buffer",
+          "op": "data.set",
+          "path": "search.unsupported_filters",
+          "value": []
+        },
+        {
+          "id": "clear-historical-filters-if-present",
+          "op": "flow.if",
+          "condition": {
+            "type": "exists",
+            "target": {"any_css": {"$channel": "selectors.clear_filters"}, "visible": true, "enabled": true}
+          },
+          "then": [
+            {
+              "id": "clear-historical-filters",
+              "op": "page.click",
+              "target": {"any_css": {"$channel": "selectors.clear_filters"}, "visible": true, "enabled": true},
+              "after_ms": {"$generated": "action_delay_ms"},
+              "on_error": "fail"
+            },
+            {
+              "id": "wait-cleared-filters",
+              "op": "page.wait",
+              "until": {"none_visible": {"$channel": "selectors.loading"}},
+              "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+            },
+            {
+              "id": "stabilize-cleared-filters",
+              "op": "page.wait",
+              "until": {
+                "type": "dom_stable",
+                "target": {"any_css": {"$channel": "selectors.result_roots"}},
+                "stable_ms": {"$channel": "timing.stable_window_ms"}
+              },
+              "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+            }
+          ],
+          "else": [],
+          "on_error": "continue",
+          "record_error_as": "search.unsupported_filters[]",
+          "error_context": {
+            "field": "existing_filters",
+            "requested": "clear_all",
+            "policy": "continue_on_error",
+            "hard_filter_fallback": false
+          }
+        },
+        {"$generated": "site_filter_program"},
+        {
+          "id": "initialize-card-buffer",
+          "op": "data.set",
+          "path": "search.cards",
+          "value": []
+        },
+        {
+          "id": "initialize-page-buffer",
+          "op": "data.set",
+          "path": "search.pages",
+          "value": []
+        },
+        {
+          "id": "collect-result-pages",
+          "op": "flow.repeat",
+          "max_iterations": {"$generated": "max_pages"},
+          "program": [
+            {
+              "id": "wait-current-result-page",
+              "op": "page.wait",
+              "until": {
+                "all": [
+                  {"none_visible": {"$channel": "selectors.loading"}},
+                  {
+                    "any": [
+                      {"any_visible": {"$channel": "selectors.candidate_rows"}},
+                      {"any_visible": {"$channel": "selectors.empty_results"}},
+                      {"text_any": {"$channel": "text_markers.no_results"}}
+                    ]
+                  }
+                ]
+              },
+              "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+            },
+            {
+              "id": "handle-confirmed-empty-result",
+              "op": "flow.if",
+              "condition": {
+                "all": [
+                  {"none_visible": {"$channel": "selectors.candidate_rows"}},
+                  {
+                    "any": [
+                      {"any_visible": {"$channel": "selectors.empty_results"}},
+                      {"text_any": {"$channel": "text_markers.no_results"}}
+                    ]
+                  }
+                ]
+              },
+              "then": [
+                {
+                  "id": "set-empty-current-page-cards",
+                  "op": "data.set",
+                  "path": "search.current_page_cards",
+                  "value": []
+                },
+                {
+                  "id": "stop-at-empty-result",
+                  "op": "flow.break"
+                }
+              ],
+              "else": [
+                {
+                  "id": "extract-current-page-cards",
+                  "op": "page.extract_list",
+                  "root": {"$schema": "card.root"},
+                  "schema": {"$schema": "card"},
+                  "limit": {"$generated": "max_candidates"},
+                  "save_as": "search.current_page_cards"
+                },
+                {
+                  "id": "append-current-page-cards",
+                  "op": "data.append",
+                  "path": "search.cards",
+                  "value": {"$ref": "search.current_page_cards"},
+                  "flatten": true,
+                  "dedupe_by": "candidate_ref",
+                  "max_items": {"$generated": "max_candidates"}
+                },
+                {
+                  "id": "append-current-page-number",
+                  "op": "data.append",
+                  "path": "search.pages",
+                  "value": {"$ref": "search.current_page_cards.0.search_page"},
+                  "dedupe": true
+                },
+                {
+                  "id": "stop-at-card-budget",
+                  "op": "flow.break",
+                  "condition": {
+                    "type": "variable",
+                    "path": "search.cards.length",
+                    "operator": "gte",
+                    "value": {"$generated": "max_candidates"}
+                  }
+                },
+                {
+                  "id": "stop-at-page-budget",
+                  "op": "flow.break",
+                  "condition": {
+                    "type": "variable",
+                    "path": "search.pages.length",
+                    "operator": "gte",
+                    "value": {"$generated": "max_pages"}
+                  }
+                },
+                {
+                  "id": "stop-at-last-page",
+                  "op": "flow.break",
+                  "condition": {
+                    "not": {
+                      "type": "exists",
+                      "target": {"any_css": {"$channel": "selectors.next_page"}, "visible": true, "enabled": true}
+                    }
+                  }
+                },
+                {
+                  "id": "open-next-page",
+                  "op": "page.click",
+                  "target": {"any_css": {"$channel": "selectors.next_page"}, "visible": true, "enabled": true},
+                  "after_ms": {"$generated": "action_delay_ms"}
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "return": {
+        "cards": {"$ref": "search.cards"},
+        "pages": {"$ref": "search.pages"},
+        "unsupported_filters": {"$ref": "search.unsupported_filters"}
+      },
+      "output": {"save_as": {"$generated": "search_output_key"}}
+    },
+    {
+      "id": "card-hard-filter",
+      "action": "data.filter",
+      "source": {"$context": {"$generated": "cards_context"}},
+      "predicates": {"$generated": "card_predicates"},
+      "unknown_policy": "keep",
+      "status_field": "card_hard_filter_status",
+      "reasons_field": "card_hard_filter_reasons",
+      "unknown_fields_field": "card_hard_filter_unknown_fields",
+      "save_as": {"$generated": "card_filter_key"}
+    },
+    {
+      "id": "collect-candidate-details",
+      "action": "tabs.foreach",
+      "items": {"$context": {"$generated": "card_filter_key"}},
+      "max_items": {"$generated": "max_details"},
+      "open": {
+        "mode": "click_capture",
+        "expected_domains": {"$channel": "allowed_domains"},
+        "pre_program": [
+          {
+            "id": "read-current-search-page",
+            "op": "page.extract",
+            "schema": {
+              "fields": {
+                "number": {
+                  "source": "text",
+                  "locator": {"any_css": {"$channel": "selectors.active_page"}},
+                  "transforms": ["trim", "to_number"]
+                }
+              }
+            },
+            "save_as": "tabs.search_page"
+          },
+          {
+            "id": "restore-card-page",
+            "op": "flow.if",
+            "condition": {
+              "type": "variable",
+              "path": "tabs.search_page.number",
+              "operator": "not_equals",
+              "value": {"$item": "search_page"}
+            },
+            "then": [
+              {
+                "id": "click-card-page",
+                "op": "page.click",
+                "target": {
+                  "any_css": {"$channel": "selectors.page_items"},
+                  "text": {"equals": {"$item": "search_page"}},
+                  "visible": true,
+                  "enabled": true
+                }
+              },
+              {
+                "id": "wait-restored-card-page",
+                "op": "page.wait",
+                "until": {
+                  "all": [
+                    {"none_visible": {"$channel": "selectors.loading"}},
+                    {"any_visible": {"$channel": "selectors.candidate_rows"}}
+                  ]
+                },
+                "timeout_ms": {"$channel": "timing.search_timeout_ms"}
+              }
+            ],
+            "else": []
+          }
+        ],
+        "target": {
+          "any_css": {"$channel": "selectors.candidate_names"},
+          "within": {
+            "any_css": {"$channel": "selectors.candidate_rows"},
+            "index": {"$item": "row_index"}
+          },
+          "visible": true,
+          "enabled": true
+        },
+        "timeout_ms": {"$channel": "timing.detail_timeout_ms"}
+      },
+      "steps": [
+        {
+          "id": "extract-open-detail",
+          "action": "page.run",
+          "program": {"$workflow": "detail.program"},
+          "return": {"$workflow": "detail.return"}
+        }
+      ],
+      "collect": {
+        "save_as": {"$generated": "details_key"},
+        "value": {"$response": ""},
+        "merge_item": true,
+        "url_field": "detail_url"
+      },
+      "failures_as": {"$generated": "failures_key"}
+    },
+    {
+      "id": "detail-hard-filter",
+      "action": "data.filter",
+      "source": {"$context": {"$generated": "details_key"}},
+      "predicates": {"$generated": "detail_predicates"},
+      "unknown_policy": "keep",
+      "status_field": "detail_hard_filter_status",
+      "reasons_field": "detail_hard_filter_reasons",
+      "unknown_fields_field": "detail_hard_filter_unknown_fields",
+      "save_as": {"$generated": "detail_filter_key"}
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "root": {"any_css": ["#resume-detail-single"]},
+  "required_fields": ["source_candidate_id", "display_name"],
+  "fields": {
+    "detail_url": {"source": "page.url"},
+    "source_candidate_id": {
+      "required": true,
+      "strategies": [
+        {
+          "source": "page.url",
+          "transforms": [
+            {
+              "op": "regex_capture",
+              "pattern": "[?&](?:res_id_encode|resIdEncode|resumeId|res_id|candidateId|cid)=([^&#]+)",
+              "group": 1,
+              "flags": "i"
+            },
+            "url_decode",
+            "trim"
+          ]
+        },
+        {
+          "source": "page.title",
+          "transforms": [{"op": "regex_capture", "pattern": "^NO\\.([^\\s]+)", "group": 1}, "trim"]
+        },
+        {
+          "source": "text",
+          "transforms": [
+            {"op": "regex_capture", "pattern": "简历编号[：:]\\s*([A-Za-z0-9_-]{8,})", "group": 1},
+            "trim"
+          ]
+        }
+      ],
+      "max_length": 200
+    },
+    "display_name": {
+      "required": true,
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .name"},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 100}]
+    },
+    "profile_text": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 800}]
+    },
+    "current_work_text": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 1},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 400}]
+    },
+    "gender": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [{"op": "regex_capture", "pattern": "(?:^|\\s)(男|女)(?:\\s|\\d)", "group": 1}]
+    },
+    "age": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [{"op": "regex_capture", "pattern": "(\\d{2})\\s*岁", "group": 1}, "to_number"]
+    },
+    "city": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [
+        {
+          "op": "regex_capture",
+          "pattern": "(北京|上海|广州|深圳|杭州|苏州|成都|武汉|南京|西安|天津|福建)",
+          "group": 1
+        }
+      ]
+    },
+    "education": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [
+        {"op": "regex_capture", "pattern": "(博士/博士后|博士|硕士|本科|大专|中专/中技|高中及以下)", "group": 1}
+      ]
+    },
+    "work_years": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [{"op": "regex_capture", "pattern": "工作\\s*(\\d{1,2})\\s*年", "group": 1}, "to_number"]
+    },
+    "school_tags": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-edu-info"]},
+      "transforms": [
+        {
+          "op": "regex_tags",
+          "rules": [
+            {"pattern": "(?:^|\\D)985(?:\\D|$)", "values": ["985", "211"]},
+            {"pattern": "(?:^|\\D)211(?:\\D|$)", "values": ["211"]},
+            {"pattern": "双一流|一流大学|一流学科", "values": ["double_first_class"]},
+            {"pattern": "海外留学|境外院校|海外院校", "values": ["overseas"]}
+          ]
+        },
+        "unique"
+      ]
+    },
+    "current_salary": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .basic-cont > .sep-info", "index": 0},
+      "transforms": [{"op": "regex_capture", "pattern": "(\\d+(?:-\\d+)?k)", "group": 1, "flags": "i"}]
+    },
+    "job_status": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-basic-info .user-status-tag"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "expected_title": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-job-exp-info .title"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "expected_salary": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-job-exp-info .salary"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "expected_city": {
+      "source": "text",
+      "locator": {"css": "#resume-detail-job-exp-info .dqname-wrap"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "expected_industries": {
+      "source": "texts",
+      "locator": {"css": "#resume-detail-job-exp-info .lebels-wrap span"},
+      "transforms": ["trim", "collapse_whitespace", "unique", {"op": "max_items", "value": 30}]
+    },
+    "skills": {
+      "source": "texts",
+      "locator": {"css": "#resume-detail-single [data-selector^='keyword_']"},
+      "transforms": ["trim", "collapse_whitespace", "unique", {"op": "max_item_length", "value": 40}, {"op": "max_items", "value": 30}]
+    },
+    "job_intention_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-job-exp-info"]},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "work_experience_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-work-info"]},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "project_experience_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-project-info"]},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "education_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-edu-info"]},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "language_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-lang-info"]},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "self_summary": {
+      "source": "text",
+      "locator": {"any_css": ["#resume-detail-self-eva-info"]},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    }
+  },
+  "computed": {
+    "candidate_ref": {"template": "liepin:{source_candidate_id}"},
+    "source": {"constant": "liepin"}
+  }
+}

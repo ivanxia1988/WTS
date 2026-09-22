@@ -1,0 +1,172 @@
+{
+  "root": {
+    "any_css": [
+      "#resultList table.new-resume-card tbody > tr[data-tlg-elem-id='h_pc_search_res_listcard']",
+      "#resultList table.new-resume-card tbody > tr"
+    ],
+    "visible": true
+  },
+  "required_fields": ["source_candidate_id"],
+  "fields": {
+    "source_candidate_id": {
+      "required": true,
+      "strategies": [
+        {
+          "source": "attribute",
+          "locator": {"css": "input[name='res_id_encode']"},
+          "attribute": "value",
+          "transforms": [
+            "trim",
+            {"op": "regex_capture", "pattern": "^([A-Za-z0-9_-]{8,200})$", "group": 1}
+          ]
+        },
+        {
+          "source": "attribute",
+          "locator": {"css": "input[name='res_id_encode']"},
+          "attribute": "value",
+          "transforms": [
+            "url_decode",
+            {"op": "json_pointer_first", "paths": ["/res_id_encode", "/resume_id", "/res_id", "/id"]},
+            "trim"
+          ]
+        },
+        {
+          "source": "attribute",
+          "attribute": "data-tlg-ext",
+          "transforms": ["url_decode", {"op": "json_pointer_first", "paths": ["/res_id", "/res_id_encode"]}, "trim"]
+        },
+        {
+          "source": "attribute",
+          "attribute": "data_info",
+          "transforms": ["url_decode", {"op": "json_pointer_first", "paths": ["/res_id", "/res_id_encode"]}, "trim"]
+        },
+        {
+          "source": "attribute",
+          "attribute": "data-info",
+          "transforms": ["url_decode", {"op": "json_pointer_first", "paths": ["/res_id", "/res_id_encode"]}, "trim"]
+        },
+        {"source": "attribute", "attribute": "data-resume-id", "transforms": ["trim"]},
+        {"source": "attribute", "attribute": "data-res-id", "transforms": ["trim"]},
+        {
+          "source": "attribute",
+          "attribute": "class",
+          "transforms": [{"op": "regex_capture", "pattern": "(?:^|\\s)r-([A-Za-z0-9_-]{8,200})(?:\\s|$)", "group": 1}]
+        },
+        {
+          "source": "attribute",
+          "locator": {"css": "a[href*='/resume/showresumedetail/']"},
+          "attribute": "href",
+          "transforms": [
+            {
+              "op": "regex_capture",
+              "pattern": "[?&](?:res_id_encode|resIdEncode|resumeId|res_id|candidateId|cid)=([^&#]+)",
+              "group": 1,
+              "flags": "i"
+            },
+            "url_decode",
+            "trim"
+          ]
+        }
+      ],
+      "max_length": 200
+    },
+    "row_index": {"source": "item.index"},
+    "search_page": {
+      "source": "text",
+      "scope": "document",
+      "locator": {"any_css": ["#resultList .resume-list-pagebar > .ant-pagination-item-active"]},
+      "transforms": ["trim", "to_number"]
+    },
+    "display_name": {
+      "source": "text",
+      "locator": {"any_css": [".new-resume-personal-name > em", ".new-resume-personal-name"], "visible": true},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 100}]
+    },
+    "city": {
+      "source": "text",
+      "locator": {"css": ".new-resume-personal-detail .personal-detail-dq"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "education": {
+      "source": "text",
+      "locator": {"css": ".new-resume-personal-detail .personal-detail-edulevel"},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "age": {
+      "source": "text",
+      "locator": {"css": ".new-resume-personal-detail .personal-detail-age"},
+      "transforms": [
+        {"op": "regex_capture", "pattern": "(\\d{2})\\s*岁", "group": 1},
+        "to_number"
+      ]
+    },
+    "work_years": {
+      "source": "text",
+      "locator": {"css": ".new-resume-personal-detail .personal-detail-workyears"},
+      "transforms": [
+        {"op": "regex_capture", "pattern": "工作\\s*(\\d{1,2})\\s*年", "group": 1},
+        "to_number"
+      ]
+    },
+    "expected_city": {
+      "source": "text",
+      "locator": {"css": ".personal-expect-content > *", "index": 0},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "expected_title": {
+      "source": "text",
+      "locator": {"css": ".personal-expect-content > *", "index": 1},
+      "transforms": ["trim", "collapse_whitespace"]
+    },
+    "current_work_text": {
+      "source": "text",
+      "locator": {"css": ".detail-resume-card-wrap p", "text": {"contains": "·"}},
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 240}]
+    },
+    "skills": {
+      "source": "texts",
+      "locator": {"css": ".new-resume-personal-skills > span"},
+      "transforms": ["trim", "collapse_whitespace", "unique", {"op": "max_items", "value": 30}]
+    },
+    "last_active": {
+      "strategies": [
+        {
+          "source": "text",
+          "locator": {"css": ".new-resume-status em"},
+          "transforms": ["trim", "collapse_whitespace"]
+        },
+        {
+          "source": "constant_if_exists",
+          "locator": {"css": ".new-resume-status [role='online']"},
+          "value": "在线"
+        }
+      ]
+    },
+    "highlights": {
+      "source": "texts",
+      "locator": {"css": ".detail-resume-card-wrap p"},
+      "exclude_text_any": ["立即沟通", "超级聊聊", "查看联系方式", "下载简历", "索要附件"],
+      "transforms": [
+        "trim",
+        "collapse_whitespace",
+        "unique",
+        {"op": "max_item_length", "value": 180},
+        {"op": "max_items", "value": 8}
+      ]
+    },
+    "card_text": {
+      "source": "text",
+      "transforms": ["trim", "collapse_whitespace", {"op": "max_length", "value": 2400}]
+    },
+    "detail_url": {
+      "source": "attribute",
+      "locator": {"css": "a[href*='/resume/showresumedetail/']"},
+      "attribute": "href",
+      "transforms": ["absolute_url"]
+    }
+  },
+  "computed": {
+    "candidate_ref": {"template": "liepin:{source_candidate_id}"},
+    "source": {"constant": "liepin"}
+  }
+}
