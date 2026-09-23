@@ -1,8 +1,0 @@
-{
-  "workflow_type": "candidate.search",
-  "description": "公司词探测。复用宿主已知的 candidate.search 类型；每家公司一条“主锚点 + 公司名”查询，只搜索并抽取首屏卡片计数，不做硬筛、不采详情。summary.workflow 为 company_probe。",
-  "required_capabilities": [
-    "page.run.v1",
-    "human.takeover.v1"
-  ]
-}

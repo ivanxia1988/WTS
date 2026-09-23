@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from workflow_limits import MAX_CANDIDATE_SCORES
+
 
 EXPERIENCE_FIELDS = {"work_experience_summary", "project_experience_summary"}
 NEGATIVE_TEXT_FIELDS = EXPERIENCE_FIELDS | {
@@ -16,10 +18,10 @@ NEGATIVE_TEXT_FIELDS = EXPERIENCE_FIELDS | {
 }
 SCORE_FIELDS = {
     "candidate_ref", "detail_ref", "detail_section", "scored_iteration", "matches",
-    "must_score", "nice_score", "risk_score", "unknown", "evidence_summary", "correction_reason",
+    "must_score", "nice_score", "risk_score", "must_unknown", "unknown", "evidence_summary", "correction_reason",
 }
-
-
+# details.expand holds candidates opened by an in-round expansion (build_workflow.py expand).
+DETAIL_SECTIONS = {"details.primary", "details.secondary", "details.expand"}
 def integer(value: Any, label: str, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise ValueError(f"{label} 必须是 {low}-{high} 的整数")
@@ -84,8 +86,8 @@ def decision_receipt(plan: dict, *, iteration: int, task_id: str, store_root: Pa
         )
     old_scores = {row["candidate_ref"]: row for row in previous.get("candidate_scores", [])}
     rows = basis.get("candidate_scores")
-    if not isinstance(rows, list) or len(rows) > 25:
-        raise ValueError("candidate_scores 必须是最多 25 条的数组")
+    if not isinstance(rows, list) or len(rows) > MAX_CANDIDATE_SCORES:
+        raise ValueError(f"candidate_scores 必须是最多 {MAX_CANDIDATE_SCORES} 条的数组")
     results: dict[str, dict] = {}
     profiles: dict[str, dict] = {}
     scores: dict[str, dict] = {}
@@ -106,8 +108,8 @@ def decision_receipt(plan: dict, *, iteration: int, task_id: str, store_root: Pa
                 raise ValueError("detail_ref 结果摘要不匹配，不能依据已变化的数据复用评分")
             results[ref] = json.loads(raw)
         section = row.get("detail_section")
-        if section not in {"details.primary", "details.secondary"}:
-            raise ValueError("detail_section 必须是 details.primary 或 details.secondary")
+        if section not in DETAIL_SECTIONS:
+            raise ValueError("detail_section 必须是 " + " / ".join(sorted(DETAIL_SECTIONS)))
         data = results[ref].get("data", {}).get("details", {}).get(section.split(".")[1], [])
         found = [item for item in data if item.get("candidate_ref") == row["candidate_ref"]]
         if len(found) != 1:
@@ -141,6 +143,10 @@ def decision_receipt(plan: dict, *, iteration: int, task_id: str, store_root: Pa
             raise ValueError("unknown 必须是最多 20 条的文本数组")
         for item in unknown:
             text(item, "unknown 条目", 200)
+        if type(row.get("must_unknown")) is not bool:
+            raise ValueError("must_unknown 必须是 boolean，表示必须满足项是否仍有未核实内容")
+        if row["must_unknown"] and not unknown:
+            raise ValueError("must_unknown 为 true 时须在 unknown 列出未核实的必须满足项")
         text(row.get("evidence_summary"), "evidence_summary")
         old = old_scores.get(ref)
         changed = old and any(old.get(key) != row.get(key) for key in SCORE_FIELDS - {"correction_reason"})
@@ -161,7 +167,7 @@ def decision_receipt(plan: dict, *, iteration: int, task_id: str, store_root: Pa
             "nice": row.get("nice_score"), "risk": row.get("risk_score"),
             "matches": row["matches"], "scored_iteration": scored_iteration,
             "recommendable": row["matches"] and total >= 60,
-            "strong": row["matches"] and total >= 80 and must >= 70 and
+            "strong": row["matches"] and not row["must_unknown"] and total >= 80 and must >= 70 and
                       (row.get("risk_score") is None or row["risk_score"] <= 30),
         }
     if set(old_scores) - set(scores):

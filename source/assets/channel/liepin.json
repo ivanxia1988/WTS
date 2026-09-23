@@ -2,7 +2,7 @@
   "channel_id": "liepin",
   "display_name": "猎聘",
   "interaction_mode": "human",
-  "rule_version": "liepin-2026.08.25.1",
+  "rule_version": "liepin-2026.09.22.2",
   "allowed_domains": [
     "h.liepin.com",
     "passport.liepin.com",
@@ -167,7 +167,9 @@
     "experience_years",
     "education",
     "school_requirements",
+    "company",
     "age_range",
+    "gender",
     "activity_recency",
     "job_hop_frequency"
   ],
@@ -197,9 +199,29 @@
       "row": {"css": ".search-filter .search-item.sfilter-additional", "text": {"contains": "院校要求"}},
       "option": {"any_css": [".tag-item", ".unlimited-btn"]}
     },
+    "company": {
+      "interaction": "company_autocomplete",
+      "row": {"css": ".search-filter .search-item", "text": {"contains": "公司名称"}, "visible": true},
+      "input": {"css": "input[role='combobox']"},
+      "dropdown": {
+        "css": ".ant-select-dropdown:not(.ant-select-dropdown-hidden):has([id='${company_control.list_id}'])",
+        "visible": true
+      },
+      "option": {"css": ".ant-select-item-option:not(.ant-select-item-option-disabled) .ant-select-item-option-content"},
+      "selected": {"any_css": [".ant-select-selection-item-content", ".ant-select-selection-item"]},
+      "confirm": {"role": "button", "text": {"contains_any": ["确定", "确 定"]}}
+    },
     "age_range": {
       "interaction": "range_inputs",
-      "row": {"css": ".search-filter .sfilter-other-condition .search-item.age-box", "text": {"contains": "年龄"}}
+      "row": {"css": ".search-filter .sfilter-other-condition .search-item.age-box", "text": {"contains_any": ["年龄", "年 龄", "年  龄", "年   龄"]}}
+    },
+    "gender": {
+      "interaction": "select_dropdown",
+      "row": {
+        "css": ".search-filter .sfilter-other-condition .search-item",
+        "text": {"contains_any": ["性别", "性 别", "性  别", "性   别"]}
+      },
+      "trigger": {"css": ".ant-select-selector"}
     },
     "activity_recency": {
       "interaction": "select_dropdown",
@@ -257,6 +279,12 @@
       "last_5_years_max_3": "近5年不超过3段",
       "last_3_years_max_2": "近3年不超过2段",
       "recent_2_jobs_min_2_years_each": "近2段均不低于2年"
+    },
+    "gender": {
+      "male": "男",
+      "female": "女",
+      "男": "男",
+      "女": "女"
     }
   },
   "experience_presets": [
