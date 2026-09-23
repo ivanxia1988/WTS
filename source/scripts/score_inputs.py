@@ -8,24 +8,6 @@ from pathlib import Path
 import re
 
 
-def write_private_json(path, value):
-    if path.is_symlink():
-        raise ValueError('评分文件不能是符号链接')
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    descriptor = -1
-    try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-            descriptor = -1
-            json.dump(value, handle, ensure_ascii=False)
-        temporary.replace(path)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if temporary.exists():
-            temporary.unlink()
-
-
 def export_inputs(task_id, result_ref, task_dir, store_root):
     match = re.fullmatch(r'result://([A-Za-z0-9._-]{1,100})/([a-f0-9]{64})', result_ref)
     if not match or match[1] != task_id:
@@ -65,13 +47,11 @@ def export_inputs(task_id, result_ref, task_dir, store_root):
                     entry['profile_path'] = str(path)
                     packets.append((path, {**entry, 'profile': row}))
                 entries.append(entry)
-    private_root = folder.parent
-    private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(private_root, 0o700)
-    folder.mkdir(exist_ok=True, mode=0o700)
-    os.chmod(folder, 0o700)
+    folder.mkdir(parents=True, exist_ok=True)
     for path, packet in packets:
-        write_private_json(path, packet)
+        if path.is_symlink():
+            raise ValueError('评分文件不能是符号链接')
+        path.write_text(json.dumps(packet, ensure_ascii=False), encoding='utf-8')
     return {'result_ref': result_ref, 'finished_at': result.get('workflow', {}).get('finished_at'),
             'entries': entries}
 

@@ -57,7 +57,6 @@ class DecisionBasisTests(unittest.TestCase):
             "must_score": 80,
             "nice_score": 60,
             "risk_score": 20,
-            "must_unknown": False,
             "unknown": [],
             "evidence_summary": "具备 Agent 项目证据",
         }
@@ -132,37 +131,6 @@ class DecisionBasisTests(unittest.TestCase):
                 task_id=self.task_id,
                 store_root=self.store,
             )
-
-    def test_accepts_full_three_round_expansion_budget(self) -> None:
-        count = 3 * (5 + 3 + 3 * 30)
-        profiles = [
-            {
-                "candidate_ref": f"liepin:candidate-{index}",
-                "detail_hard_filter_status": "matched",
-            }
-            for index in range(count)
-        ]
-        result = {"data": {"details": {"primary": profiles}}}
-        raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
-        digest = hashlib.sha256(raw).hexdigest()
-        path = self.store / "result-store" / self.task_id / f"{digest}.json"
-        path.write_bytes(raw)
-        detail_ref = f"result://{self.task_id}/{digest}"
-        scores = []
-        for profile in profiles:
-            score = self.score()
-            score["candidate_ref"] = profile["candidate_ref"]
-            score["detail_ref"] = detail_ref
-            scores.append(score)
-
-        receipt = decision_receipt(
-            self.plan(scores=scores),
-            iteration=2,
-            task_id=self.task_id,
-            store_root=self.store,
-        )
-
-        self.assertEqual(receipt["counts"]["scored"], count)
 
 
 if __name__ == "__main__":

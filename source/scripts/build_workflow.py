@@ -15,20 +15,18 @@ from typing import Any
 
 from pacing import pace_preflight, pace_search_path
 from decision_basis import decision_receipt
-from workflow_limits import (
-    MAX_CARDS_PER_PATH,
-    MAX_EXPANSIONS_PER_ITERATION,
-    MAX_SEARCH_ITERATION,
-    PRIMARY_DETAIL_BUDGET,
-    SECONDARY_DETAIL_BUDGET,
-)
 
 
 SKILL_NAME = "wts"
 SKILL_VERSION = "0.7.1"
 WORKFLOW_SCHEMA = "browser.workflow.v1"
 SCHEMA_VERSION = 2
+MAX_SEARCH_ITERATION = 3
+PRIMARY_DETAIL_BUDGET = 5
+SECONDARY_DETAIL_BUDGET = 3
+MAX_CARDS_PER_PATH = 30
 # 轮内扩张：同一轮最多扩张几次、一次最多开多少份详情。
+MAX_EXPANSIONS_PER_ITERATION = 3
 MAX_EXPAND_DETAILS = MAX_CARDS_PER_PATH
 EXPAND_PATH_NAME = "expand"
 MAX_PLAN_BYTES = 256 * 1024
@@ -1924,16 +1922,6 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
     the Agent selected (``include_candidate_refs``). Filters and scoring criteria must match
     the plan that actually ran for this round, so the expansion cannot drift the requirement."""
     plan, warnings = read_expand_plan(args.plan_file)
-    prior_expansions = sorted(
-        workflow["expansion"]
-        for workflow in verified_workflows(args, args.iteration)
-        if isinstance(workflow.get("expansion"), int) and workflow["expansion"] > 0
-    )
-    expected_expansion = len(prior_expansions) + 1
-    if prior_expansions != list(range(1, expected_expansion)):
-        raise ValueError("历史扩张序号不连续，不能继续扩张")
-    if args.expansion != expected_expansion:
-        raise ValueError(f"下一次扩张序号必须为 {expected_expansion}")
     base_plan = executed_plan(args, args.iteration)
     base_queries = {base_plan["primary_query"], base_plan.get("secondary_query")}
     refill_query = refill_primary_query(args, args.iteration)
@@ -1946,7 +1934,7 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
     base_version = base_plan.get("requirement_version", "v1")
     if plan["requirement_version"] != base_version:
         raise ValueError(f"扩张计划的 requirement_version 必须与本轮计划一致（{base_version}）")
-    for key in ("site_filters", "hard_filters", "semantic_criteria"):
+    for key in ("hard_filters", "semantic_criteria"):
         if plan.get(key) != base_plan.get(key):
             changed = changed_fields_summary(base_plan.get(key) or {}, plan.get(key) or {}, key)
             raise ValueError(f"扩张不能改变本轮条件：{', '.join(changed)}；请照抄 iteration-{args.iteration}.json")

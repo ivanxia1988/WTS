@@ -8,8 +8,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from workflow_limits import MAX_CANDIDATE_SCORES
-
 
 EXPERIENCE_FIELDS = {"work_experience_summary", "project_experience_summary"}
 NEGATIVE_TEXT_FIELDS = EXPERIENCE_FIELDS | {
@@ -22,6 +20,10 @@ SCORE_FIELDS = {
 }
 # details.expand holds candidates opened by an in-round expansion (build_workflow.py expand).
 DETAIL_SECTIONS = {"details.primary", "details.secondary", "details.expand"}
+# Three rounds of 5+3 plus up to three expansions per round can exceed the old cap of 25.
+MAX_CANDIDATE_SCORES = 120
+
+
 def integer(value: Any, label: str, low: int, high: int) -> int:
     if type(value) is not int or not low <= value <= high:
         raise ValueError(f"{label} 必须是 {low}-{high} 的整数")
