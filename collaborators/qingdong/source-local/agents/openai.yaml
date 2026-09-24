@@ -1,0 +1,4 @@
+interface:
+  display_name: "本地简历库寻访"
+  short_description: "根据职位描述在本机已整理的简历和 Excel 人才台账里检索并精筛候选人"
+  default_prompt: "使用 $wts-local 根据这份 JD 在本地简历库里寻找合适候选人。"
