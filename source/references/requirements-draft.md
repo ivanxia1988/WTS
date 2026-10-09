@@ -19,7 +19,7 @@
 | `verify_in_interview` | 【面试核实项】 | `{text, source}` 数组；简历通常看不出来的要求（顶会论文、绩效、口碑、抗压等），不评分、不筛选 |
 | `exclude_signals` | 【排除信号】 | `{text, default: bool}` |
 | `hard_filters` | 【硬性筛选条件】 | `{location, education, experience_years, company, school_requirements, work_content}`，未指定写 `"不限"` |
-| `site_filter_preferences` | 【站内筛选偏好】 | `{age_range, gender, activity_recency, job_hop_frequency}`；只记录用户明确指定的页面条件，未指定写 `"不限"`，不并入硬筛或评分 |
+| `site_filter_preferences` | 【站内筛选偏好】 | `{age_range, gender, activity_recency, job_hop_frequency}`；记录 JD 明确条件或澄清选择结果，未指定写 `"不限"`，不并入硬筛或评分 |
 | `keywords` | 【检索关键词】 | `{active: [{word, family}], reserve: [{word, family}]}`，active ≤6、reserve ≤2 |
 | `non_search_terms` | 【不做搜索词】 | `{text, destination: "评分" \| "筛选" \| "不用"}` |
 | `cities` | 【城市】 | `{A: [], B: [], C: []}` |
@@ -53,7 +53,8 @@
 - <每条 key_judgments 一行："判断 + 依据"，assumption 用"我按……理解"句式>
 - <notes.boilerplate 非空时加一行："X、Y 这类要求我没当硬条件，需要的话告诉我">
 
-搜索时我会用这些词：<keywords.active 的 word，加目标公司池排第一的公司名>
+搜索时我会用这些词：<keywords.active 的 word>
+优先找这家公司的人：<目标公司池本轮选中的公司；无限制时省略>
 ```
 
 ## 渲染规则

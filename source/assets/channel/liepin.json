@@ -202,6 +202,7 @@
     "company": {
       "interaction": "company_autocomplete",
       "row": {"css": ".search-filter .search-item", "text": {"contains": "公司名称"}, "visible": true},
+      "trigger": {"any_css": ["input[placeholder='搜索公司']", ".ant-select-selection-placeholder"], "visible": true},
       "input": {"css": "input[role='combobox']"},
       "dropdown": {
         "css": ".ant-select-dropdown:not(.ant-select-dropdown-hidden):has([id='${company_control.list_id}'])",

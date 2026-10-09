@@ -6,8 +6,9 @@
 
 一次返回 JSON：
 
-- `candidate_scores`：每人一条。字段仅限 `candidate_ref`、`detail_ref`、`detail_section`（照抄详情文件）、`scored_iteration`（本轮 N）、`matches`、`must_score`、`nice_score`、`risk_score`（后两项无对应需求时为 null）、`must_unknown`、`unknown`（最多 20 项、每项 200 字内）、`evidence_summary`（800 字内的推荐或不推荐理由，不是履历复述）、`correction_reason`（仅重评时填）。
+- `candidate_scores`：每人一条。字段仅限 `candidate_ref`、`detail_ref`、`detail_section`（照抄详情文件）、`scored_iteration`（首次评分为本轮 N，重评保留原值）、`matches`、`must_score`、`nice_score`、`risk_score`（后两项无对应需求时为 null）、`must_unknown`、`unknown`（最多 20 项、每项 200 字内）、`evidence_summary`（800 字内的推荐或不推荐理由，不是履历复述）、`correction_reason`（仅重评时填）。
 - `labels`：`[{candidate_ref, total, recommendable, strong}]`，口径见下。
+- `calibration_samples`：仅第 1 轮返回 2 位可推荐（优先强匹配）和 1 位不推荐样例，不足按实有，其余轮次返回 []。每条含 `candidate_ref`、`display_name`、`work_experience_summary`（只取最近一段公司/职位/起止时间）、`current_work_text`（经历为空时回退）；逐字摘自详情，缺项留空。理由由主 Agent 按同人的 `evidence_summary` 渲染，此数组不写入 decision_basis。
 - `company_hits`：总分 ≥ 70 的人各一条 `{candidate_ref, current, past[]}`；没有则 `[]`。
 
 核对每位待评人都有 `candidate_scores` 与 `labels` 条目；缺的留未完成，不补造。总分和排名由 Builder 复核。
@@ -25,7 +26,7 @@
 3. **风险分**（0–100）：需求版本里有排除信号才评，否则记"不适用"。0 无明确风险，1–29 低，30–59 实质，60–79 高，80–100 严重。
 4. **总分** = 必须满足 × 60% + 加分项 × 25% + (100 − 风险) × 15%；不适用的维度剔除后按剩余权重重新归一化，四舍五入到整数。
 
-每条得分引用明确原文，优先查 `evidence_section`，也可取自简历其他区块；取证位置不改变条件的满足标准。全文仍无依据时记 **unknown**：既不给分也不算否定，在结果中逐项列出；计算必须满足匹配分时把 unknown 的条目从分母里剔除，只按有证据（正面或反面）的条目算。需求版本里的 `verify_in_interview` 不参与任何分项，简历上碰巧写了也只作加分项证据。
+每条得分引用明确原文，优先查 `evidence_section`，也可取自简历其他区块；取证位置不改变条件的满足标准。全文仍无依据时记 **unknown**：既不给分也不算否定，在结果中逐项列出；计算必须满足匹配分时把 unknown 的条目从分母里剔除，只按有证据（正面或反面）的条目算。需求版本里的 `verify_in_interview` 不参与任何分项；简历上碰巧写了，只补充面试核实材料。
 
 ## 判定口径
 

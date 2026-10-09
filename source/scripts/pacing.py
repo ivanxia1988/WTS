@@ -86,10 +86,11 @@ def pace_details(step, base, channel, rng):
     opening = step["open"]
     opening["program"] = [{"id": step["id"] + "-open", "op": "page.click", "target": opening["target"]}]
     programs = [opening["pre_program"], opening["program"], *[s["program"] for s in step["steps"]]]
-    # Normal path: read list position -> open detail -> extract detail.
+    # Normal path: read list position -> optional live identity lookup -> open -> extract.
     # Conditional page restoration receives the smaller ordinary action delay.
     operations = [s for program in programs for s in program if s.get("op") in ATOMIC_OPS]
-    if len(operations) != 3:
+    expected_operations = 4 if any(op["id"].endswith("-read-live-card-identities") for op in operations) else 3
+    if len(operations) != expected_operations:
         raise ValueError("Detail pacing budget must be reviewed when its atomic sequence changes")
     allocations = [split_budget(len(operations), rng) for _ in range(step["max_items"])]
     delays = {op["id"]: [row[index] for row in allocations] for index, op in enumerate(operations)}

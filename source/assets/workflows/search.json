@@ -354,17 +354,6 @@
         "url_field": "detail_url"
       },
       "failures_as": {"$generated": "failures_key"}
-    },
-    {
-      "id": "detail-hard-filter",
-      "action": "data.filter",
-      "source": {"$context": {"$generated": "details_key"}},
-      "predicates": {"$generated": "detail_predicates"},
-      "unknown_policy": "keep",
-      "status_field": "detail_hard_filter_status",
-      "reasons_field": "detail_hard_filter_reasons",
-      "unknown_fields_field": "detail_hard_filter_unknown_fields",
-      "save_as": {"$generated": "detail_filter_key"}
     }
   ]
 }
