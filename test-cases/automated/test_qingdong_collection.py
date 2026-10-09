@@ -50,6 +50,11 @@ class CollectionTests(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0, out)
             return out
         self.assertEqual(run.returncode, 0, out)
+        if out.get('status') == 'reused':
+            digest = out['result_ref'].rsplit('/', 1)[1]
+            result = json.loads((self.root / 'result-store/test-task' / (digest + '.json')).read_text())
+            return next(w for p in (self.root / 'workflow-store/test-task').glob('*.json')
+                        if (w := json.loads(p.read_text()))['workflow_id'] == result['workflow']['workflow_id'])
         digest = out['workflow_ref'].rsplit('/', 1)[1]
         return json.loads((self.root / 'workflow-store/test-task' / (digest + '.json')).read_text())
 
@@ -87,7 +92,14 @@ class CollectionTests(unittest.TestCase):
         for refs in [['liepin:invent001'], ['liepin:reject001']]:
             self.assertIn('matched/unknown', self.collect(refs, ok=False)['error'])
         self.card_ref = self.card_ref.replace('test-task', 'other-task')
-        self.assertIn('当前任务', self.collect([], ok=False)['error'])
+        self.assertIn('当前会话', self.collect([], ok=False)['error'])
+
+    def test_collect_emits_all_collected_details_without_second_filter(self):
+        w = self.collect(['liepin:new000001'])
+        self.assertFalse(any(s['id'].endswith('detail-hard-filter') for s in w['steps']))
+        emit = w['steps'][-1]['value']
+        self.assertEqual(emit['details']['primary'], {'$context': 'details_primary'})
+        self.assertIn('primary-card-hard-filter', [s['id'] for s in w['steps']])
 
     def test_empty_selection_never_opens_details(self):
         w = self.collect([])

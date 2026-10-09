@@ -47,6 +47,34 @@ class ScoreInputsTests(unittest.TestCase):
         self.assertEqual(out['entries'][3]['detail_status'], 'failed')
         self.assertNotIn('profile_path', out['entries'][3])
 
+    def test_unfiltered_details_have_collected_status_without_stdout_resumes(self):
+        for rows in self.result['data']['details'].values():
+            for row in rows:
+                row.pop('detail_hard_filter_status')
+        out = module.export_inputs('t', self.save(), self.root, self.root)
+        self.assertEqual([e['detail_status'] for e in out['entries']],
+                         ['collected', 'collected', 'collected', 'failed'])
+        self.assertNotIn('RESUME_', json.dumps(out))
+
+    def test_collected_profile_enters_real_scoring_receipt_without_filter_status(self):
+        import test_decision_basis as fixtures
+        case = fixtures.DecisionBasisTests()
+        case.setUp()
+        self.addCleanup(case.tearDown)
+        path = next((case.store / 'result-store' / case.task_id).glob('*.json'))
+        result = json.loads(path.read_text())
+        result['data']['details']['primary'][0].pop('detail_hard_filter_status')
+        raw = json.dumps(result).encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        path.with_name(digest + '.json').write_bytes(raw)
+        case.detail_ref = f'result://{case.task_id}/{digest}'
+        spec = importlib.util.spec_from_file_location('qingdong_decisions', SCRIPT.with_name('decision_basis.py'))
+        decisions = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(decisions)
+        receipt = decisions.decision_receipt(case.plan(), iteration=2,
+                                            task_id=case.task_id, store_root=case.store)
+        self.assertEqual(receipt['top10'], ['liepin:candidate-1'])
+
     def test_wrong_task_and_tampered_source_rejected(self):
         ref = self.save()
         with self.assertRaises(ValueError):

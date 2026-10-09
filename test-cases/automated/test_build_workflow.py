@@ -55,81 +55,71 @@ class BuildWorkflowTests(unittest.TestCase):
             },
         }
 
-    def persist_completed_search(self) -> tuple[argparse.Namespace, dict, str]:
-        task_dir = self.root / "wts" / "search-plans"
-        task_dir.mkdir(parents=True)
-        plan_path = task_dir / "iteration-1.json"
-        plan = self.search_plan()
-        plan_path.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
-        args = self.args("search", 1)
-        args.plan_file = str(plan_path)
-        workflow = build_workflow.build_search(args, self.assets)
-        saved = build_workflow.save_workflow(workflow, self.root)
-        workflow_id = workflow["workflow_id"]
+    def persist_result(self, workflow: dict, data: dict) -> str:
+        build_workflow.save_workflow(workflow, self.root)
         result = {
             "status": "success",
             "workflow": {
-                "workflow_id": workflow_id,
-                "task_id": args.task_id,
+                "workflow_id": workflow["workflow_id"],
+                "task_id": workflow["task_id"],
                 "finished_at": "2026-09-19T03:00:00Z",
             },
-            "data": {
-                "details": {
-                    "primary": [
-                        {
-                            "candidate_ref": "liepin:candidate-1",
-                            "detail_hard_filter_status": "matched",
-                            "display_name": "候选人甲",
-                            "detail_url": "https://h.liepin.com/resume/showresumedetail/?id=1",
-                            "work_experience_summary": "负责 Agent 平台",
-                        }
-                    ],
-                    "secondary": [],
-                },
-                "search": {"primary": {"query": "AI Agent LangGraph"}, "secondary": {}},
-            },
+            "data": data,
         }
         raw = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
-        result_digest = hashlib.sha256(raw).hexdigest()
-        result_path = self.root / "result-store" / args.task_id / f"{result_digest}.json"
-        result_path.parent.mkdir(parents=True)
-        result_path.write_bytes(raw)
-        self.assertTrue(saved["workflow_ref"].startswith("wf://"))
-        return args, plan, result_digest
+        digest = hashlib.sha256(raw).hexdigest()
+        path = self.root / "result-store" / workflow["task_id"] / f"{digest}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return digest
 
-    def test_current_preflight_search_and_probe_compile(self) -> None:
+    def persist_cards(self, plan: dict | None = None):
+        plan = self.search_plan() if plan is None else plan
+        task_dir = self.root / "wts" / "search-plans"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        args = self.args("search", 1)
+        args.plan_file = str(task_dir / "iteration-1.json")
+        Path(args.plan_file).write_text(json.dumps(plan, ensure_ascii=False))
+        workflow = build_workflow.build_search(args, self.assets)
+        digest = self.persist_result(workflow, {
+            "candidates": {"primary": [{"candidate_ref": "liepin:candidate-1",
+                                         "card_hard_filter_status": "matched"}]},
+            "details": {"primary": []},
+        })
+        return args, plan, workflow, digest
+
+    def compile_collect(self, args, card_digest):
+        collect_args = self.args("collect", 1)
+        collect_args.plan_file = str(self.root / "wts/search-plans/iteration-1-collect.json")
+        Path(collect_args.plan_file).write_text(json.dumps({
+            "result_ref": f"result://{args.task_id}/{card_digest}",
+            "primary": ["liepin:candidate-1"],
+        }))
+        return build_workflow.build_collect(collect_args, self.assets)
+
+    def persist_completed_round(self, plan: dict | None = None):
+        args, plan, _, card_digest = self.persist_cards(plan)
+        workflow = self.compile_collect(args, card_digest)
+        digest = self.persist_result(workflow, {
+            "details": {"primary": [{
+                "candidate_ref": "liepin:candidate-1",
+                "detail_hard_filter_status": "matched",
+                "display_name": "候选人甲",
+                "detail_url": "https://h.liepin.com/resume/showresumedetail/?id=1",
+                "work_experience_summary": "负责 Agent 平台",
+            }], "secondary": []},
+            "search": {"primary": {"query": plan["primary_query"]}, "secondary": {}},
+        })
+        return args, plan, digest
+
+    def test_preflight_then_search_returns_cards_without_opening_details(self) -> None:
         preflight = build_workflow.build_preflight(self.args("preflight", 0), self.assets)
         self.assertTrue(any(step["id"] == "open-channel-search" for step in preflight["steps"]))
-
-        search = build_workflow.build_search(
-            self.args(
-                "search",
-                1,
-                {
-                    "primary_query": "AI Agent LangGraph",
-                    "site_filters": {},
-                    "hard_filters": {},
-                    "semantic_criteria": {
-                        "must_have": ["Agent 经验"],
-                        "nice_to_have": [],
-                        "exclude_signals": [],
-                    },
-                },
-            ),
-            self.assets,
-        )
-        self.assertTrue(any("pacing" in json.dumps(step) for step in search["steps"]))
-
-        probe = build_workflow.build_probe(
-            self.args(
-                "probe",
-                1,
-                {"anchor": "AI Agent", "companies": ["阿里巴巴"], "site_filters": {}},
-            ),
-            self.assets,
-        )
-        self.assertEqual(probe["input_summary"]["probe"], True)
-        self.assertEqual(probe["steps"][-1]["value"]["summary"]["workflow"], "company_probe")
+        _, _, search, _ = self.persist_cards()
+        self.assertEqual(search["input_summary"]["stage"], "cards")
+        self.assertEqual(search["limits"]["max_tabs"], 0)
+        self.assertFalse(any(step["action"] == "tabs.foreach" for step in search["steps"]))
+        self.assertIn("pacing-before", json.dumps(search))
 
     def test_channel_default_compiles_human_interaction_metadata(self) -> None:
         workflow = build_workflow.build_preflight(self.args("preflight", 0), self.assets)
@@ -143,39 +133,47 @@ class BuildWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["interaction_mode"], "direct")
         self.assertNotIn("interaction.human.v1", workflow["required_capabilities"])
 
-    def test_human_search_browses_details_without_removing_pacing(self) -> None:
-        workflow = build_workflow.build_search(
-            self.args(
-                "search",
-                1,
-                {
-                    "primary_query": "AI Agent LangGraph",
-                    "site_filters": {},
-                    "hard_filters": {},
-                    "semantic_criteria": {
-                        "must_have": ["Agent 经验"],
-                        "nice_to_have": [],
-                        "exclude_signals": [],
-                    },
-                },
-            ),
-            self.assets,
-        )
+    def test_collect_browses_selected_details_with_pacing(self) -> None:
+        args, _, _, digest = self.persist_cards()
+        workflow = self.compile_collect(args, digest)
+        self.assertEqual(workflow["interaction_mode"], "human")
+        self.assertEqual(workflow["input_summary"]["stage"], "details")
+        tabs = [step for step in workflow["steps"] if step["action"] == "tabs.foreach"]
+        self.assertEqual(len(tabs), 1)
+        self.assertEqual(tabs[0]["max_items"], 1)
         encoded = json.dumps(workflow, ensure_ascii=False)
         self.assertIn('"op": "page.scroll"', encoded)
-        self.assertIn("pacing-before", encoded)
+        self.assertIn("pacing-before-primary-extract-detail", encoded)
+        # Normal detail path excludes conditional page-restoration waits.
+        detail = tabs[0]
+        programs = [detail["open"]["pre_program"], detail["open"]["program"],
+                    *[step["program"] for step in detail["steps"]]]
+        delays = [step["until"]["ms"] for program in programs for step in program
+                  if step.get("op") == "page.wait"
+                  and step.get("until", {}).get("type") == "delay"]
+        self.assertTrue(all(delay > 0 for delay in delays))
+        self.assertEqual(sum(delays), 15000)
 
-    def test_human_probe_keeps_company_probe_behavior(self) -> None:
-        workflow = build_workflow.build_probe(
-            self.args(
-                "probe",
-                1,
-                {"anchor": "AI Agent", "companies": ["阿里巴巴"], "site_filters": {}},
-            ),
-            self.assets,
-        )
+    def test_card_only_round_cannot_be_used_for_settlement(self) -> None:
+        args, _, _, _ = self.persist_cards()
+        with self.assertRaisesRegex(ValueError, "先执行 collect"):
+            build_workflow.executed_plan(args, 1)
+
+    def test_refill_drops_company_after_collection_and_only_once(self) -> None:
+        plan = self.search_plan()
+        plan["primary_query"] += " 阿里巴巴"
+        args, _, _ = self.persist_completed_round(plan)
+        args.workflow_type = "refill"
+        args.plan_file = str(self.root / "wts/search-plans/iteration-1-refill.json")
+        Path(args.plan_file).write_text(json.dumps({"dropped_company": "阿里巴巴"}))
+        workflow = build_workflow.build_refill(args, self.assets)
         self.assertEqual(workflow["interaction_mode"], "human")
-        self.assertEqual(workflow["steps"][-1]["value"]["summary"]["workflow"], "company_probe")
+        self.assertEqual(workflow["input_plan"]["primary_query"], "AI Agent LangGraph")
+        self.assertEqual(workflow["input_plan"]["hard_filters"], plan["hard_filters"])
+        self.assertEqual(workflow["input_summary"]["stage"], "cards")
+        build_workflow.save_workflow(workflow, self.root)
+        with self.assertRaisesRegex(ValueError, "只能补搜一次"):
+            build_workflow.build_refill(args, self.assets)
 
     def test_search_plan_accepts_requirement_version_and_decision_basis(self) -> None:
         path = self.root / "plan.json"
@@ -218,7 +216,7 @@ class BuildWorkflowTests(unittest.TestCase):
         self.assertEqual(args.decision_receipt["completed_iteration"], 0)
 
     def test_recovers_plan_from_completed_workflow_not_edited_plan_file(self) -> None:
-        args, original, _ = self.persist_completed_search()
+        args, original, _ = self.persist_completed_round()
         workflow_files = list((self.root / "workflow-store" / args.task_id).glob("*.json"))
         persisted = json.loads(workflow_files[0].read_text(encoding="utf-8"))
         self.assertEqual(persisted["input_plan"]["primary_query"], original["primary_query"])
@@ -234,7 +232,7 @@ class BuildWorkflowTests(unittest.TestCase):
         self.assertEqual(recovered["primary_query"], "AI Agent LangGraph")
 
     def test_settlement_writes_private_final_report_data(self) -> None:
-        args, _, result_digest = self.persist_completed_search()
+        args, _, result_digest = self.persist_completed_round()
         decision_dir = self.root / "wts"
         decision_path = decision_dir / "final-decision.json"
         decision = {
@@ -250,6 +248,7 @@ class BuildWorkflowTests(unittest.TestCase):
                     "must_score": 80,
                     "nice_score": None,
                     "risk_score": None,
+                    "must_unknown": False,
                     "unknown": [],
                     "evidence_summary": "有 Agent 平台经历",
                 }

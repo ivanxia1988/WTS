@@ -57,6 +57,7 @@ class DecisionBasisTests(unittest.TestCase):
             "must_score": 80,
             "nice_score": 60,
             "risk_score": 20,
+            "must_unknown": False,
             "unknown": [],
             "evidence_summary": "具备 Agent 项目证据",
         }

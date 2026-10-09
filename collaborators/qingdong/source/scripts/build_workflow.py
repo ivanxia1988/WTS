@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from pacing import pace_preflight, pace_search_path
+from collection import prepare_collection, snapshot_step
 from decision_basis import decision_receipt
+from recovery import reconcile, source_workflow, scope, session_history
 
 
 SKILL_NAME = "wts"
-SKILL_VERSION = "0.7.0"
+SKILL_VERSION = "0.7.1"
 WORKFLOW_SCHEMA = "browser.workflow.v1"
 SCHEMA_VERSION = 2
 MAX_SEARCH_ITERATION = 3
@@ -82,6 +84,9 @@ JOB_HOP_FREQUENCY = {
     "last_3_years_max_2",
     "recent_2_jobs_min_2_years_each",
 }
+GENDER_CHOICES = {"male", "female", "男", "女"}
+AGE_MIN = 16
+AGE_MAX = 60
 SITE_EXPERIENCE_PRESETS = {(0, 0), (1, 3), (3, 5), (5, 10), (10, None)}
 ALLOWED_SITE_FILTER_KEYS = {
     "current_cities",
@@ -91,6 +96,10 @@ ALLOWED_SITE_FILTER_KEYS = {
     "school_requirements",
     "company",
     "work_content",
+    "activity_recency",
+    "job_hop_frequency",
+    "age_range",
+    "gender",
 }
 ALLOWED_HARD_FILTER_KEYS = {
     "current_cities",
@@ -118,6 +127,8 @@ ALLOWED_PLAN_KEYS = {
 }
 ALLOWED_REFILL_PLAN_KEYS = {"dropped_company"}
 ALLOWED_EXPAND_PLAN_KEYS = {
+    "source_path",
+    "result_ref",
     "requirement_version",
     "query",
     "include_candidate_refs",
@@ -127,7 +138,7 @@ ALLOWED_EXPAND_PLAN_KEYS = {
     "action_delay_ms",
 }
 ALLOWED_SEMANTIC_KEYS = {"must_have", "nice_to_have", "exclude_signals"}
-SENSITIVE_PLAN_FIELDS = {"age_range", "activity_recency", "job_hop_frequency"}
+SENSITIVE_PLAN_FIELDS = {"age_range", "gender"}
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -247,10 +258,11 @@ def normalize_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str,
     site_filters = dict(plan.get("site_filters") or {})
     hard_filters = dict(plan.get("hard_filters") or {})
 
-    sensitive = sorted((set(site_filters) | set(hard_filters)) & SENSITIVE_PLAN_FIELDS)
-    if sensitive:
+    sensitive_hard = sorted(set(hard_filters) & SENSITIVE_PLAN_FIELDS)
+    if sensitive_hard:
         raise ValueError(
-            "年龄、活跃度、跳槽频率不参与检索、站内筛选或硬筛: " + ", ".join(sensitive)
+            "年龄、性别不参与硬筛或评分，仅可作为站内筛选: "
+            + ", ".join(sensitive_hard)
         )
     unknown_site = sorted(set(site_filters) - ALLOWED_SITE_FILTER_KEYS)
     if unknown_site:
@@ -258,16 +270,63 @@ def normalize_plan(plan: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str,
     unknown_hard = sorted(set(hard_filters) - ALLOWED_HARD_FILTER_KEYS)
     if unknown_hard:
         raise ValueError(f"hard_filters 包含未知字段: {', '.join(unknown_hard)}")
-    for field in ("company", "work_content"):
-        if field in site_filters:
+    if "work_content" in site_filters:
+        site_filters.pop("work_content")
+        warnings.append(
+            {
+                "field": "site_filters.work_content",
+                "code": "SITE_FILTER_UNSUPPORTED",
+                "message": "猎聘页面无该站内筛选项，已跳过页面筛选；同名字段请写入 hard_filters 做文本硬筛",
+            }
+        )
+
+    if "company" in site_filters:
+        site_filters["company"] = normalize_string_list(
+            site_filters["company"], "site_filters.company", maximum=1
+        )
+
+    companies = site_filters.get("company") or []
+    hard_companies = hard_filters.get("company") or []
+    if companies and hard_companies and companies[0] not in hard_companies:
+        raise ValueError("原生公司定向必须来自公司硬条件名单")
+
+    for field, allowed in (
+        ("activity_recency", ACTIVITY_RECENCY),
+        ("job_hop_frequency", JOB_HOP_FREQUENCY),
+    ):
+        if field not in site_filters:
+            continue
+        value = site_filters[field]
+        if value is None or (isinstance(value, str) and not value.strip()):
             site_filters.pop(field)
-            warnings.append(
-                {
-                    "field": f"site_filters.{field}",
-                    "code": "SITE_FILTER_UNSUPPORTED",
-                    "message": "猎聘页面无该站内筛选项，已跳过页面筛选；同名字段请写入 hard_filters 做文本硬筛",
-                }
+            continue
+        if not isinstance(value, str) or value.strip() not in allowed:
+            raise ValueError(
+                f"site_filters.{field} 必须是单个预设字符串: "
+                f"{', '.join(sorted(allowed))}；不限时省略字段"
             )
+        site_filters[field] = value.strip()
+
+    if "gender" in site_filters:
+        gender_value = site_filters["gender"]
+        if gender_value is None or (
+            isinstance(gender_value, str) and not gender_value.strip()
+        ):
+            site_filters.pop("gender")
+        else:
+            if not isinstance(gender_value, str) or gender_value.strip() not in GENDER_CHOICES:
+                raise ValueError(
+                    "site_filters.gender 必须是单个值: male, female, 男, 女；不限时省略字段"
+                )
+            site_filters["gender"] = gender_value.strip()
+
+    if "age_range" in site_filters:
+        site_filters["age_range"] = normalize_range(
+            site_filters["age_range"],
+            "site_filters.age_range",
+            minimum_allowed=AGE_MIN,
+            maximum_allowed=AGE_MAX,
+        )
 
     for field in ("current_cities", "expected_cities"):
         if field in site_filters:
@@ -546,6 +605,9 @@ def read_expand_plan(plan_path: str) -> tuple[dict[str, Any], list[dict[str, str
     version = plan.get("requirement_version", "v1")
     if not isinstance(version, str) or not version.strip() or len(version) > 80:
         raise ValueError("requirement_version 必须是 1-80 字符的已确认需求版本")
+    source_path = plan.get("source_path")
+    if source_path not in (None, "primary", "secondary", "refill"):
+        raise ValueError("source_path 必须是 primary、secondary 或 refill")
     query = normalize_query(plan.get("query"), "query")
     include_refs = normalize_candidate_refs(
         plan.get("include_candidate_refs"),
@@ -566,6 +628,8 @@ def read_expand_plan(plan_path: str) -> tuple[dict[str, Any], list[dict[str, str
         {
             "requirement_version": version.strip(),
             "query": query,
+            "source_path": source_path,
+            "result_ref": plan.get("result_ref"),
             "include_candidate_refs": include_refs,
             "site_filters": normalized["site_filters"],
             "hard_filters": normalized["hard_filters"],
@@ -600,7 +664,7 @@ def map_filter_value(field: str, value: Any, channel: dict[str, Any]) -> Any:
     if field in ("education", "school_requirements"):
         mapping = mappings.get(field, {})
         return [mapping.get(item, item) for item in value]
-    if field in ("activity_recency", "job_hop_frequency"):
+    if field in ("activity_recency", "job_hop_frequency", "gender"):
         mapping = mappings.get(field, {})
         return mapping.get(value, value)
     return copy.deepcopy(value)
@@ -612,6 +676,188 @@ def locator_within(locator: dict[str, Any], within: dict[str, Any]) -> dict[str,
     result.setdefault("visible", True)
     result.setdefault("enabled", True)
     return result
+
+
+def require_unique_filter_targets(
+    step_id: str, targets: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": f"count-{step_id}",
+            "op": "page.extract",
+            "schema": {
+                "fields": {
+                    name: {"source": "count", "locator": target}
+                    for name, target in targets.items()
+                }
+            },
+            "save_as": "filter_matches",
+        },
+        {
+            "id": f"require-unique-{step_id}",
+            "op": "page.wait",
+            "until": {
+                "all": [
+                    {
+                        "type": "variable",
+                        "path": f"filter_matches.{name}",
+                        "value": 1,
+                    }
+                    for name in targets
+                ]
+            },
+            "timeout_ms": 100,
+        },
+    ]
+
+
+def compile_company_filter_program(
+    value: str,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    action_delay_ms: int,
+) -> list[dict[str, Any]]:
+    control_timeout = channel["timing"]["control_timeout_ms"]
+    row = config["row"]
+    trigger = locator_within(config["trigger"], row)
+    company_input = locator_within(config["input"], row)
+    option = {
+        **locator_within(config["option"], config["dropdown"]),
+        "text": {"equals": value},
+    }
+    confirm = locator_within(config["confirm"], row)
+    selected = {
+        "any": [
+            {
+                "type": "exists",
+                "target": {
+                    **locator_within(config["selected"], row),
+                    "text": {"equals": value},
+                },
+            },
+            {
+                "all": [
+                    {"type": "value", "target": company_input, "value": value},
+                    {
+                        "type": "attribute",
+                        "target": company_input,
+                        "attribute": "aria-expanded",
+                        "value": "false",
+                    },
+                ]
+            },
+        ]
+    }
+
+    def wait(step_id: str, condition: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": f"wait-company-{step_id}",
+            "op": "page.wait",
+            "until": condition,
+            "timeout_ms": control_timeout,
+        }
+
+    return [
+        wait("trigger", {"type": "exists", "target": trigger}),
+        *require_unique_filter_targets("company-trigger", {"row": row, "trigger": trigger}),
+        {
+            "id": "activate-company-control",
+            "op": "page.click",
+            "target": trigger,
+            "after_ms": action_delay_ms,
+        },
+        wait("input", {"type": "exists", "target": company_input}),
+        *require_unique_filter_targets(
+            "company-control", {"row": row, "input": company_input}
+        ),
+        {
+            "id": "focus-company-input",
+            "op": "page.click",
+            "target": company_input,
+            "after_ms": action_delay_ms,
+        },
+        {
+            "id": "fill-company-input",
+            "op": "page.fill",
+            "target": company_input,
+            "value": value,
+            "events": ["input", "change"],
+            "after_ms": action_delay_ms,
+        },
+        {
+            "id": "read-company-list-id",
+            "op": "page.extract",
+            "schema": {
+                "fields": {
+                    "list_id": {
+                        "source": "attribute",
+                        "locator": company_input,
+                        "attribute": "aria-controls",
+                        "strategies": [{"attribute": "aria-owns"}],
+                        "transforms": [
+                            {
+                                "type": "regex_capture",
+                                "pattern": "^([A-Za-z0-9_-]+)$",
+                            }
+                        ],
+                        "required": True,
+                    }
+                }
+            },
+            "save_as": "company_control",
+        },
+        wait("suggestion", {"type": "exists", "target": option}),
+        *require_unique_filter_targets("company-suggestion", {"option": option}),
+        {
+            "id": "select-company-suggestion",
+            "op": "page.click",
+            "target": option,
+            "after_ms": action_delay_ms,
+        },
+        wait("selected", selected),
+        {
+            "id": "activate-company-confirm",
+            "op": "page.click",
+            "target": company_input,
+            "after_ms": action_delay_ms,
+        },
+        wait("confirm", {"type": "exists", "target": confirm}),
+        *require_unique_filter_targets("company-confirm", {"button": confirm}),
+        {
+            "id": "confirm-filter-company",
+            "op": "page.click",
+            "target": confirm,
+            "after_ms": action_delay_ms,
+        },
+        {
+            **wait(
+                "applied",
+                {
+                    "all": [
+                        selected,
+                        {
+                            "type": "exists",
+                            "target": {
+                                "any_css": channel["selectors"]["submitted_filter_chips"],
+                                "text": {"equals": value},
+                                "visible": True,
+                            },
+                        },
+                        {"url_contains": ["#session"]},
+                        {"none_visible": channel["selectors"]["loading"]},
+                        {
+                            "any": [
+                                {"any_visible": channel["selectors"]["candidate_rows"]},
+                                {"any_visible": channel["selectors"]["empty_results"]},
+                                {"text_any": channel["text_markers"]["no_results"]},
+                            ]
+                        },
+                    ]
+                },
+            ),
+            "timeout_ms": channel["timing"]["search_timeout_ms"],
+        },
+    ]
 
 
 def compile_site_filter_program(
@@ -740,6 +986,11 @@ def compile_site_filter_program(
                     *stable_waits(field),
                 ]
             )
+        elif interaction == "company_autocomplete":
+            operations.extend(
+                compile_company_filter_program(value[0], config, channel, action_delay_ms)
+            )
+            operations.extend(stable_waits(field))
         elif interaction == "inline_option":
             labels = value if isinstance(value, list) else [value]
             for index, label in enumerate(labels):
@@ -759,25 +1010,81 @@ def compile_site_filter_program(
                     ]
                 )
         elif interaction == "select_dropdown":
+            row = {**config["row"], "visible": True}
+            trigger = locator_within(config["trigger"], row)
+            dropdown = {
+                "any_css": selectors["select_dropdowns"],
+                "text": {"contains": value},
+                "visible": True,
+            }
+            option = {
+                "any_css": selectors["select_options"],
+                "within": dropdown,
+                "text": {"equals": value},
+                "visible": True,
+                "enabled": True,
+            }
             operations.extend(
                 [
                     {
+                        "id": f"wait-filter-{field}-trigger",
+                        "op": "page.wait",
+                        "until": {"type": "exists", "target": trigger},
+                        "timeout_ms": channel["timing"]["control_timeout_ms"],
+                    },
+                    *require_unique_filter_targets(
+                        f"{field}-control", {"row": row, "trigger": trigger}
+                    ),
+                    {
                         "id": f"open-filter-{field}",
                         "op": "page.click",
-                        "target": locator_within(config["trigger"], config["row"]),
+                        "target": trigger,
                         "after_ms": action_delay_ms,
                     },
                     {
+                        "id": f"wait-filter-{field}-options",
+                        "op": "page.wait",
+                        "until": {"type": "exists", "target": option},
+                        "timeout_ms": channel["timing"]["control_timeout_ms"],
+                    },
+                    *require_unique_filter_targets(
+                        f"{field}-option", {"dropdown": dropdown, "option": option}
+                    ),
+                    {
                         "id": f"select-filter-{field}",
                         "op": "page.click",
-                        "target": {
-                            "any_css": selectors["select_options"],
-                            "within": {"any_css": selectors["select_dropdowns"], "visible": True},
-                            "text": {"equals": value},
-                            "visible": True,
-                            "enabled": True,
-                        },
+                        "target": option,
                         "after_ms": action_delay_ms,
+                    },
+                    {
+                        "id": f"verify-filter-{field}-applied",
+                        "op": "page.wait",
+                        "until": {
+                            "all": [
+                                {"not": {"type": "exists", "target": dropdown}},
+                                {
+                                    "type": "exists",
+                                    "target": {**trigger, "text": {"equals": value}},
+                                },
+                                {
+                                    "type": "exists",
+                                    "target": {
+                                        "any_css": selectors["submitted_filter_chips"],
+                                        "text": {"equals": value},
+                                        "visible": True,
+                                    },
+                                },
+                                {"none_visible": selectors["loading"]},
+                                {
+                                    "any": [
+                                        {"any_visible": selectors["candidate_rows"]},
+                                        {"any_visible": selectors["empty_results"]},
+                                        {"text_any": channel["text_markers"]["no_results"]},
+                                    ]
+                                },
+                            ]
+                        },
+                        "timeout_ms": channel["timing"]["search_timeout_ms"],
                     },
                     *stable_waits(field),
                 ]
@@ -1138,46 +1445,21 @@ def load_verified_workflow(path: Path, root: Path) -> dict[str, Any]:
 
 
 def verified_workflows(args: argparse.Namespace, iteration: int) -> list[dict[str, Any]]:
-    root = Path(args.store_root).expanduser().resolve()
-    directory = root / "workflow-store" / args.task_id
-    if not directory.is_dir():
-        return []
-    found: list[dict[str, Any]] = []
-    for path in directory.glob("*.json"):
-        workflow = load_verified_workflow(path, root)
-        if (
-            workflow.get("task_id") == args.task_id
-            and workflow.get("iteration") == iteration
-            and (workflow.get("skill") or {}).get("name") == SKILL_NAME
-        ):
-            found.append(workflow)
-    return found
+    histories, _ = session_history(args.store_root)
+    tasks = {args.task_id, getattr(args, 'source_task_id', None)}
+    return [w for w in histories.values() if w['task_id'] in tasks and w.get('iteration') == iteration]
 
 
 def completed_results_by_workflow_id(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
-    root = Path(args.store_root).expanduser().resolve()
-    directory = root / "result-store" / args.task_id
-    found: dict[str, dict[str, Any]] = {}
-    if not directory.is_dir():
-        return found
-    for path in directory.glob("*.json"):
-        if not path.resolve().is_relative_to(root) or path.stat().st_size > 16 * 1024 * 1024:
-            raise ValueError("历史结果越界或超过大小限制")
-        raw = path.read_bytes()
-        result = json.loads(raw)
-        metadata = result.get("workflow") or {}
-        if metadata.get("task_id") != args.task_id or hashlib.sha256(raw).hexdigest() != path.stem:
-            raise ValueError("历史结果任务或摘要不匹配，不能复用执行计划")
-        if result.get("status") not in {"success", "partial"}:
+    _, histories = session_history(args.store_root)
+    tasks = {args.task_id, getattr(args, 'source_task_id', None)}
+    found = {}
+    for (task, workflow_id), runs in histories.items():
+        if task not in tasks:
             continue
-        workflow_id = metadata.get("workflow_id")
-        if not workflow_id:
-            continue
-        finished = metadata.get("finished_at") or ""
-        previous = found.get(workflow_id)
-        previous_finished = ((previous or {}).get("workflow") or {}).get("finished_at") or ""
-        if previous is None or previous_finished <= finished:
-            found[workflow_id] = result
+        completed = [r for _, r in runs if r.get('status') in {'success', 'partial'}]
+        if completed:
+            found[workflow_id] = max(completed, key=lambda r: r['workflow'].get('finished_at', ''))
     return found
 
 
@@ -1248,12 +1530,6 @@ def eligible_primary_count(result: dict[str, Any], seen: set[str]) -> int:
     )
 
 
-def collected_primary_count(workflow: dict[str, Any]) -> int:
-    selection = (workflow.get("input_summary") or {}).get("selection") or {}
-    primary = selection.get("primary") or []
-    return len(primary) if isinstance(primary, list) else 0
-
-
 def refill_primary_query(args: argparse.Namespace, iteration: int) -> str | None:
     pair = latest_completed(args, iteration, is_refill_cards)
     if not pair:
@@ -1292,18 +1568,18 @@ def compile_path_steps(
     action_delay_ms: int,
     site_filter_program: list[dict[str, Any]],
     card_predicates: list[dict[str, Any]],
-    detail_predicates: list[dict[str, Any]],
     assets: dict[str, Any],
     plan: dict[str, Any],
     channel: dict[str, Any],
     interaction_mode: str = "direct",
     drop_step_ids: set[str] | None = None,
+    collection_context: dict[str, Any] | None = None,
+    restore_search: bool = False,
 ) -> list[dict[str, Any]]:
     generated = {
         "keyword_text": query,
         "site_filter_program": site_filter_program,
         "card_predicates": card_predicates,
-        "detail_predicates": detail_predicates,
         "max_pages": 1,
         "max_candidates": max_cards,
         "max_details": max_details,
@@ -1312,7 +1588,6 @@ def compile_path_steps(
         "cards_context": f"search_{path_name}.cards",
         "card_filter_key": f"card_filter_{path_name}",
         "details_key": f"details_{path_name}",
-        "detail_filter_key": f"detail_filter_{path_name}",
         "failures_key": f"failures_{path_name}",
         "detail_browse_program": ([
             {"id": "browse-detail", "op": "page.scroll", "direction": "down", "distance": 600},
@@ -1327,9 +1602,16 @@ def compile_path_steps(
         schemas=schemas_for_path(assets, path_name),
         workflows=assets["workflows"],
     )
+    search_step = next(step for step in steps if step["id"] == "search-and-extract-cards")
+    search_step["return"]["list_state"] = {"$ref": "search.list_state"}
+    if collection_context is not None:
+        steps = prepare_collection(steps, channel, schemas_for_path(assets, path_name)["card"],
+                                   collection_context, restore_search)
+    else:
+        search_step["program"].append(snapshot_step(channel))
     dropped = set(drop_step_ids or set())
     if max_details == 0:
-        dropped |= {"collect-candidate-details", "detail-hard-filter"}
+        dropped |= {"collect-candidate-details"}
     if dropped:
         steps = [step for step in steps if step["id"] not in dropped]
     steps = prefix_step_ids(steps, path_name)
@@ -1353,20 +1635,18 @@ def build_emit_step(
                 "$context": f"search_{name}.unsupported_filters.length"
             },
             "card_filter": {"$context": f"_runtime.reports.{name}-card-hard-filter"},
-            "detail_filter": (
-                {"$context": f"_runtime.reports.{name}-detail-hard-filter"}
-                if path["max_details"]
-                else {"evaluated": 0, "matched": 0, "rejected": 0, "unknown": 0}
-            ),
+            "collected_count": {"$context": f"details_{name}.length"} if path["max_details"] else 0,
         }
         search[name] = {
             "query": path["query"],
             "unsupported_filters": {"$context": f"search_{name}.unsupported_filters"},
             "pages": {"$context": f"search_{name}.pages"},
+            "list_state": {"$context": f"search_{name}.list_state"},
+            "collection_check": {"$context": f"search_{name}.collection_check"},
         }
         candidates[name] = {"$context": f"card_filter_{name}"}
         details[name] = (
-            {"$context": f"detail_filter_{name}"} if path["max_details"] else []
+            {"$context": f"details_{name}"} if path["max_details"] else []
         )
         failures[name] = {"$context": f"failures_{name}"} if path["max_details"] else []
     return {
@@ -1443,9 +1723,20 @@ def build_preflight(args: argparse.Namespace, assets: dict[str, Any]) -> dict[st
     return workflow
 
 
+def plan_for_path(plan: dict[str, Any], path: str) -> dict[str, Any]:
+    """Company-pool targeting is primary-only; explicit company requirements persist."""
+    effective = copy.deepcopy(plan)
+    company = (effective.get("site_filters") or {}).get("company")
+    hard_companies = (effective.get("hard_filters") or {}).get("company") or []
+    if company and path != "primary" and company != hard_companies:
+        effective["site_filters"].pop("company")
+    return effective
+
+
 def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
                  selection: dict[str, list[str]] | None = None,
-                 source_plan: dict[str, Any] | None = None) -> dict[str, Any]:
+                 source_plan: dict[str, Any] | None = None,
+                 collection_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if source_plan is None:
         plan, warnings = read_plan(args.plan_file)
         previous_plan = executed_plan(args, args.iteration - 1) if args.iteration > 1 else None
@@ -1457,6 +1748,20 @@ def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
         )
     else:
         plan, warnings = copy.deepcopy(source_plan), []
+    if selection is None and source_plan is None:
+        histories, runs = session_history(args.store_root)
+        matching = [w for w in histories.values() if w['task_id'] == args.task_id
+                    and w.get('iteration') == args.iteration and not w.get('refill')
+                    and w.get('input_summary', {}).get('stage') == 'cards' and w.get('input_plan') == plan]
+        completed = [(r['workflow'].get('finished_at', ''), ref, w)
+                     for w in matching for ref, r in runs.get((w['task_id'], w['workflow_id']), [])
+                     if r.get('status') in {'success', 'partial'}]
+        if not getattr(args, 'recovery_reason', None):
+            if completed:
+                _, args.reused_cards, previous = max(completed, key=lambda x: (x[0], x[1]))
+                return previous
+            if matching:
+                raise ValueError('已有相同搜索计划但执行状态未确认；先检查 browser_embedded_status 和结果，必要时说明 recovery-reason 再搜索')
     if args.iteration == 1 and plan.get("secondary_query"):
         raise ValueError("第 1 轮不能设置 secondary_query")
     channel = assets["channel"]
@@ -1475,9 +1780,7 @@ def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
         field for field, value in site_filters.items() if value not in (None, [], "")
     }
     hard_site_filter_fields = sorted(site_filter_fields & set(hard_filters))
-    site_filter_program = compile_site_filter_program(plan, channel, action_delay_ms)
     card_predicates = compile_predicates(hard_filters, "card")
-    detail_predicates = compile_predicates(hard_filters, "detail")
     paths = [
         {
             "name": "primary",
@@ -1499,6 +1802,7 @@ def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
     for path in paths:
         if selection is not None and not selection[path["name"]]:
             continue
+        path_plan = plan_for_path(plan, path["name"])
         steps.extend(
             compile_path_steps(
                 path_name=path["name"],
@@ -1506,16 +1810,17 @@ def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
                 max_cards=path["max_cards"],
                 max_details=path["max_details"],
                 action_delay_ms=action_delay_ms,
-                site_filter_program=site_filter_program,
+                site_filter_program=compile_site_filter_program(path_plan, channel, action_delay_ms),
                 card_predicates=card_predicates + (
                     [candidate_ref_predicate(selection[path["name"]])]
                     if selection is not None and selection[path["name"]] else []
                 ),
-                detail_predicates=detail_predicates,
                 assets=assets,
-                plan=plan,
+                plan=path_plan,
                 channel=channel,
                 interaction_mode=workflow["interaction_mode"],
+                collection_context=(collection_context or {}).get(path["name"]),
+                restore_search=getattr(args, "restore_search", False),
             )
         )
     steps.append(build_emit_step(paths))
@@ -1528,7 +1833,7 @@ def build_search(args: argparse.Namespace, assets: dict[str, Any], *,
         "max_result_bytes": channel["limits"]["max_result_bytes"],
         "action_delay_ms": action_delay_ms,
         "max_step_executions": 5000,
-        "max_loop_iterations": 20,
+        "max_loop_iterations": 30,
         "max_extract_items": total_cards,
         "max_field_length": channel["limits"]["max_section_length"],
         "default_timeout_ms": channel["timing"]["search_timeout_ms"],
@@ -1563,28 +1868,11 @@ def build_collect(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str,
     selection = dict(load_plan_object(args.plan_file, "详情名单", max_bytes=MAX_PLAN_BYTES))
     if set(selection) - {"result_ref", "primary", "secondary"}:
         raise ValueError("详情名单只接受 result_ref、primary、secondary")
-    match = re.fullmatch(r"result://([A-Za-z0-9._-]{1,100})/([a-f0-9]{64})",
-                         str(selection.get("result_ref", "")))
-    if not match or match[1] != args.task_id:
-        raise ValueError("result_ref 必须来自当前任务的卡片结果")
     root = Path(args.store_root).expanduser().resolve()
-    path = (root / "result-store" / args.task_id / f"{match[2]}.json").resolve()
-    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
-        raise ValueError("卡片结果不存在、越界或过大")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != match[2]:
-        raise ValueError("卡片结果摘要不匹配")
-    result = json.loads(raw)
-    if result.get("status") not in {"success", "partial"} or result.get("workflow", {}).get("task_id") != args.task_id:
-        raise ValueError("只能从当前任务已完成的卡片结果挑人")
-    source = None
-    for file in (root / "workflow-store" / args.task_id).glob("*.json"):
-        workflow = load_verified_workflow(file, root)
-        if workflow.get("workflow_id") != result.get("workflow", {}).get("workflow_id"):
-            continue
-        source = workflow
-        break
-    if (not source or source.get("task_id") != args.task_id or source.get("iteration") != args.iteration
+    source, result = source_workflow(root, selection.get("result_ref"))
+    if result.get("status") not in {"success", "partial"}:
+        raise ValueError("只能从已完成的卡片结果挑人")
+    if (not source or source.get("iteration") != args.iteration
             or source.get("input_summary", {}).get("stage") != "cards"):
         raise ValueError("result_ref 必须对应本轮 search 的卡片结果")
     refill_collect = getattr(args, "refill_collect", False)
@@ -1603,13 +1891,6 @@ def build_collect(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str,
     if set(selection) != {"result_ref", *names}:
         raise ValueError("详情名单须填写本轮每条路径的数组，无人可选时写 []")
     primary_limit = plan["limits"]["primary_max_details"]
-    if refill_collect:
-        original = latest_completed(args, args.iteration, is_original_collect)
-        already = collected_primary_count(original[0]) if original else 0
-        remaining = primary_limit - already
-        if remaining <= 0:
-            raise ValueError("本轮主路径采集已满，不能再补搜采集")
-        primary_limit = remaining
     selected, used = {}, set()
     for name in names:
         maximum = primary_limit if name == "primary" else plan["limits"][f"{name}_max_details"]
@@ -1623,10 +1904,28 @@ def build_collect(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str,
             raise ValueError("两路详情名单不能重复选人")
         used.update(refs)
         selected[name] = refs
+    recovery_scope = scope(source)
+    receipt = reconcile(root, selected, recovery_scope, plan, seen_candidate_refs(args),
+                        getattr(args, 'retry_candidate', []))
+    for name in names:
+        limit = plan['limits'][name + '_max_details']
+        occupied = set(receipt['occupied'].get(name, []))
+        if len(occupied | set(receipt['remaining'][name])) > limit:
+            raise ValueError(f"本轮 {name} 累计采集名额超过 {limit}，已完成/已尝试/效果不明者占用名额")
+    requested = copy.deepcopy(selected)
+    selected = receipt['remaining']
     collect_args = copy.copy(args)
     collect_args.interaction_mode = source["interaction_mode"]
-    workflow = build_search(collect_args, assets, selection=selected, source_plan=plan)
-    workflow["input_summary"]["card_result_ref"] = selection["result_ref"]
+    contexts = {}
+    for name in names:
+        contexts[name] = copy.deepcopy(result.get("data", {}).get("search", {}).get(name) or {})
+        contexts[name]["cards"] = [row for row in result.get("data", {}).get("candidates", {}).get(name, [])
+                                   if row.get("candidate_ref") in selected[name]]
+    workflow = build_search(collect_args, assets, selection=selected, source_plan=plan,
+                            collection_context=contexts)
+    workflow["input_summary"].update(card_result_ref=selection["result_ref"],
+        recovery_scope=recovery_scope, requested_selection=requested, reconciliation=receipt,
+        recovery_reason=getattr(args, 'recovery_reason', None))
     if source.get("refill"):
         workflow["refill"] = True
         workflow["input_summary"]["refill"] = True
@@ -1634,26 +1933,75 @@ def build_collect(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str,
 
 
 def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, Any]:
-    """In-round expansion: re-run one query of the current round and open only the cards
+    """In-round expansion: continue on the current list and open only the cards
     the Agent selected (``include_candidate_refs``). Filters and scoring criteria must match
     the plan that actually ran for this round, so the expansion cannot drift the requirement."""
     plan, warnings = read_expand_plan(args.plan_file)
-    base_plan = executed_plan(args, args.iteration)
-    base_queries = {base_plan["primary_query"], base_plan.get("secondary_query")}
-    refill_query = refill_primary_query(args, args.iteration)
-    if refill_query:
-        base_queries.add(refill_query)
-    if plan["query"] not in base_queries:
-        raise ValueError(
-            "扩张计划的 query 必须是本轮已执行的主路径、第二路或补搜查询，扩张只重开同一页的卡片"
-        )
-    base_version = base_plan.get("requirement_version", "v1")
-    if plan["requirement_version"] != base_version:
-        raise ValueError(f"扩张计划的 requirement_version 必须与本轮计划一致（{base_version}）")
-    for key in ("hard_filters", "semantic_criteria"):
+    root = Path(args.store_root).expanduser().resolve()
+    card_ref = plan.get('result_ref')
+    if not card_ref:
+        workflows, runs = session_history(root)
+        matches = []
+        matched_sources = set()
+        for key, w in workflows.items():
+            if w['task_id'] != args.task_id or w.get('iteration') != args.iteration or w.get('input_summary', {}).get('stage') != 'cards':
+                continue
+            for ref, result in runs.get(key, []):
+                if result.get('status') not in {'success', 'partial'}:
+                    continue
+                for name in ('primary', 'secondary'):
+                    label = 'refill' if w.get('refill') else name
+                    if plan.get('source_path') and plan['source_path'] != label:
+                        continue
+                    if w['input_plan'].get(name + '_query') == plan['query']:
+                        matches.append((result['workflow'].get('finished_at', ''), ref, name))
+                        matched_sources.add(label)
+        if not matches:
+            raise ValueError('扩张缺少可核验的卡片结果；提供 result_ref，先读取卡片而非重跑整轮')
+        if len(matched_sources) > 1 and not plan.get('source_path'):
+            raise ValueError('多个卡片来源查询相同，扩张必须指定 source_path 或 result_ref')
+        _, card_ref, source_name = max(matches)
+    source, card_result = source_workflow(root, card_ref)
+    if (source.get('iteration') != args.iteration or source.get('input_summary', {}).get('stage') != 'cards'
+            or card_result.get('status') not in {'success', 'partial'}):
+        raise ValueError('扩张 result_ref 必须引用本轮已完成的卡片结果')
+    label = plan.get('source_path')
+    source_name = 'primary' if label == 'refill' else label
+    if source_name is None:
+        matches = [name for name in ('primary', 'secondary')
+                   if source['input_plan'].get(name + '_query') == plan['query']]
+        if len(matches) != 1:
+            raise ValueError('扩张必须指定 source_path')
+        source_name = matches[0]
+    if bool(source.get('refill')) != (label == 'refill') and label is not None:
+        raise ValueError('扩张 source_path 与卡片结果来源不一致')
+    prior_args = copy.copy(args)
+    prior_args.task_id = source['task_id']
+    executed_plan(prior_args, args.iteration)  # Preserve the completed-round gate for expansion.
+    base_plan = source['input_plan']
+    expected = plan_for_path(base_plan, source_name)
+    if plan['query'] != base_plan.get(source_name + '_query') or plan['site_filters'] != expected['site_filters']:
+        raise ValueError('扩张 source_path/query/site_filters 必须与所引用卡片结果一致')
+    for key in ('requirement_version', 'hard_filters', 'semantic_criteria'):
         if plan.get(key) != base_plan.get(key):
-            changed = changed_fields_summary(base_plan.get(key) or {}, plan.get(key) or {}, key)
-            raise ValueError(f"扩张不能改变本轮条件：{', '.join(changed)}；请照抄 iteration-{args.iteration}.json")
+            raise ValueError(f'扩张不能改变本轮 {key}')
+    cards = card_result.get('data', {}).get('candidates', {}).get(source_name, [])
+    eligible = {row.get('candidate_ref') for row in cards if row.get('card_hard_filter_status') in {'matched', 'unknown'}}
+    if set(plan['include_candidate_refs']) - eligible:
+        raise ValueError('扩张只能选择来源卡片中 matched/unknown 的候选人')
+    receipt = reconcile(root, {'expand': plan['include_candidate_refs']}, scope(source), plan,
+                        seen_candidate_refs(args), getattr(args, 'retry_candidate', []))
+    selected = receipt['remaining']['expand']
+    occupied = set(receipt['occupied'].get('expand:' + str(args.expansion), []))
+    histories, _ = session_history(root)
+    previous = [w for w in histories.values() if scope(w) == scope(source)
+                and w.get('expansion') == args.expansion]
+    original = min(previous, key=lambda w: w.get('created_at', '')) if previous else None
+    budget = len(original['input_plan']['include_candidate_refs']) if original else len(plan['include_candidate_refs'])
+    if len(occupied | set(selected)) > budget:
+        raise ValueError('本次扩张累计采集名额超过原名单上限')
+    context = copy.deepcopy(card_result.get('data', {}).get('search', {}).get(source_name) or {})
+    context['cards'] = [row for row in cards if row.get('candidate_ref') in selected]
     channel = assets["channel"]
     template = assets["workflows"]["search"]
     workflow = base_workflow(args, template, channel)
@@ -1670,9 +2018,8 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
     }
     site_filter_program = compile_site_filter_program(plan, channel, action_delay_ms)
     card_predicates = compile_predicates(hard_filters, "card")
-    card_predicates.append(candidate_ref_predicate(plan["include_candidate_refs"]))
-    detail_predicates = compile_predicates(hard_filters, "detail")
-    max_details = len(plan["include_candidate_refs"])
+    card_predicates.append(candidate_ref_predicate(selected)) if selected else None
+    max_details = len(selected)
     paths = [
         {
             "name": EXPAND_PATH_NAME,
@@ -1689,12 +2036,12 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
         action_delay_ms=action_delay_ms,
         site_filter_program=site_filter_program,
         card_predicates=card_predicates,
-        detail_predicates=detail_predicates,
         assets=assets,
         plan=plan,
         channel=channel,
         interaction_mode=workflow["interaction_mode"],
-    )
+        collection_context=context, restore_search=getattr(args, "restore_search", False),
+    ) if selected else []
     steps.append(build_emit_step(paths, workflow_name="candidate_expand"))
     workflow["expansion"] = args.expansion
     workflow["limits"] = {
@@ -1704,7 +2051,7 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
         "max_result_bytes": channel["limits"]["max_result_bytes"],
         "action_delay_ms": action_delay_ms,
         "max_step_executions": 5000,
-        "max_loop_iterations": max(20, max_details),
+        "max_loop_iterations": max(30, max_details),
         "max_extract_items": MAX_CARDS_PER_PATH,
         "max_field_length": channel["limits"]["max_section_length"],
         "default_timeout_ms": channel["timing"]["search_timeout_ms"],
@@ -1714,7 +2061,12 @@ def build_expand(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
         "expansion": args.expansion,
         "requirement_version": plan["requirement_version"],
         "query": plan["query"],
-        "include_candidate_refs": plan["include_candidate_refs"],
+        "include_candidate_refs": selected,
+        "requested_selection": {"expand": plan["include_candidate_refs"]},
+        "card_result_ref": card_ref,
+        "recovery_scope": scope(source),
+        "reconciliation": receipt,
+        "recovery_reason": getattr(args, "recovery_reason", None),
         "site_filter_fields": sorted(site_filter_fields),
         "hard_filter_fields": sorted(hard_filters.keys()),
         "semantic_criteria": plan["semantic_criteria"],
@@ -1776,6 +2128,12 @@ def executed_plan(args: argparse.Namespace, iteration: int) -> dict[str, Any]:
             if workflow_id in results
         ]
         if not completed:
+            accounted = [w for w in verified_workflows(args, iteration)
+                         if not w.get('expansion') and not w.get('refill')
+                         and w.get('input_summary', {}).get('reconciliation')
+                         and not any(w['input_summary']['reconciliation']['remaining'].values())]
+            if accounted:
+                return max(accounted, key=lambda w: w.get('created_at', ''))['input_plan']
             raise ValueError(f"第 {iteration} 轮没有已完成结果；先读取执行状态对账，不能跳过该轮或原样重跑")
         return details_plans[max(completed)[1]]
     if refill_collect_done and original_cards_plan:
@@ -1786,10 +2144,22 @@ def executed_plan(args: argparse.Namespace, iteration: int) -> dict[str, Any]:
 
 
 def build_refill(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, Any]:
-    """In-round refill: drop the company word and search the primary path again."""
+    """Release a company query token or a stored native company filter."""
     dropped = read_refill_plan(args.plan_file)
-    if any(workflow.get("refill") for workflow in verified_workflows(args, args.iteration)):
-        raise ValueError("同一轮只能补搜一次")
+    prior_refills = [w for w in verified_workflows(args, args.iteration) if is_refill_cards(w)]
+    if prior_refills:
+        histories, runs = session_history(args.store_root)
+        prior = prior_refills[-1]
+        if prior.get('input_summary', {}).get('dropped_company') != dropped:
+            raise ValueError('同一轮只能补搜一次，续跑沿用原补搜条件')
+        completed = [(r['workflow'].get('finished_at', ''), ref, w)
+                     for w in prior_refills for ref, r in runs.get((w['task_id'], w['workflow_id']), [])
+                     if r.get('status') in {'success', 'partial'}]
+        if not getattr(args, 'recovery_reason', None):
+            if completed:
+                _, args.reused_cards, previous = max(completed, key=lambda x: (x[0], x[1]))
+                return previous
+            raise ValueError('补搜已编译但状态未确认；先核对浏览器和结果，必要时提供 recovery-reason')
     pair = latest_completed(args, args.iteration, is_original_search_cards)
     if not pair:
         raise ValueError("本轮还没有搜索卡片结果，不能补搜")
@@ -1798,22 +2168,32 @@ def build_refill(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
     if not isinstance(plan.get("primary_query"), str):
         raise ValueError("本轮搜索计划缺少 primary_query，不能补搜")
     tokens = plan["primary_query"].split()
-    if dropped not in tokens:
-        raise ValueError("dropped_company 必须是本轮主路径查询里的一个完整词")
+    native_company = (plan.get("site_filters") or {}).get("company")
+    if native_company != [dropped] and (native_company or dropped not in tokens):
+        raise ValueError("dropped_company 必须等于本轮原生公司条件或主路径的完整公司词")
     hard_companies = (plan.get("hard_filters") or {}).get("company") or []
-    if dropped in hard_companies:
+    if hard_companies == [dropped]:
         raise ValueError("该公司是硬性条件，不能去掉后再搜")
     eligible = eligible_primary_count(result, seen_candidate_refs(args))
     limit = (plan.get("limits") or {}).get("primary_max_details", PRIMARY_DETAIL_BUDGET)
     if eligible >= limit:
         raise ValueError("主路径可采人数已达上限，无需补搜")
-    if eligible > 0 and not latest_completed(args, args.iteration, is_original_collect):
+    refs = [r['candidate_ref'] for r in result.get('data', {}).get('candidates', {}).get('primary', [])
+            if r.get('card_hard_filter_status') in {'matched', 'unknown'}]
+    progress = reconcile(args.store_root, {'primary': refs}, scope(source), plan, seen_candidate_refs(args))
+    if len(progress['occupied'].get('primary', [])) >= limit:
+        raise ValueError('本轮主路径累计名额已满，无需补搜')
+    if eligible > 0 and progress['remaining']['primary']:
         raise ValueError("可采人数大于 0 时先采集这些人，再补搜")
     refill_plan = copy.deepcopy(plan)
-    refill_plan["primary_query"] = normalize_query(
-        " ".join(token for token in tokens if token != dropped),
-        "primary_query",
-    )
+    if native_company:
+        refill_plan["site_filters"].pop("company")
+    else:
+        if dropped in hard_companies:
+            raise ValueError("该公司是硬性条件，不能去掉后再搜")
+        refill_plan["primary_query"] = normalize_query(
+            " ".join(token for token in tokens if token != dropped), "primary_query"
+        )
     refill_plan.pop("secondary_query", None)
     refill_plan["limits"] = normalize_search_limits(refill_plan.get("limits"), has_secondary=False)
     refill_args = copy.copy(args)
@@ -1822,6 +2202,7 @@ def build_refill(args: argparse.Namespace, assets: dict[str, Any]) -> dict[str, 
     workflow["refill"] = True
     workflow["input_summary"]["refill"] = True
     workflow["input_summary"]["dropped_company"] = dropped
+    workflow["input_summary"]["recovery_scope"] = scope(source)
     return workflow
 
 
@@ -1910,11 +2291,12 @@ def settle_search(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="WTS：preflight 登录前置；search 读取卡片；collect 采集所选详情；refill 去掉公司词补搜；expand 轮内扩张；settle 结算最后已完成轮次",
+        description="WTS：preflight 登录前置；search 读取卡片；collect 采集所选详情；refill 放宽公司定向补搜；expand 轮内扩张；settle 结算最后已完成轮次",
         epilog="没有 reflect 子命令。settle --iteration N 使用最后已完成轮次 N，不是 N+1。expand 和 refill 附属于当前轮，不新增轮次。",
     )
     parser.add_argument("workflow_type", choices=["preflight", "search", "collect", "refill", "expand", "settle"])
     parser.add_argument("--task-id", required=True)
+    parser.add_argument("--source-task-id", help="同会话旧任务，读取其已核验计划与结果继续")
     parser.add_argument("--iteration", type=int, default=0)
     parser.add_argument(
         "--expansion",
@@ -1923,6 +2305,10 @@ def parse_args() -> argparse.Namespace:
         help=f"expand 专用：本轮第几次扩张，1-{MAX_EXPANSIONS_PER_ITERATION}",
     )
     parser.add_argument("--plan-file")
+    parser.add_argument("--restore-search", action="store_true",
+                        help="collect/expand 显式恢复搜索页；默认仅检查并继续")
+    parser.add_argument("--recovery-reason", help="恢复搜索或重试明确失败候选人的原因")
+    parser.add_argument("--retry-candidate", action="append", default=[], help="仅重试对账中明确失败的编号")
     parser.add_argument("--decision-file", help="settle 默认读取任务目录 wts/final-decision.json")
     parser.add_argument("--task-work-dir", default=os.environ.get("DEEPAGENT_TASK_WORK_DIR", ""))
     parser.add_argument("--store-root", default=os.environ.get("DEEPAGENT_WORKFLOW_STORE_DIR", ""))
@@ -1933,6 +2319,12 @@ def parse_args() -> argparse.Namespace:
         help="交互模式；省略时使用渠道资产的默认值",
     )
     args = parser.parse_args()
+    if (args.restore_search or args.retry_candidate) and args.workflow_type not in {"collect", "expand"}:
+        parser.error("恢复和重试仅用于 collect/expand")
+    if (args.restore_search or args.retry_candidate) and not (args.recovery_reason or '').strip():
+        parser.error("恢复和重试需要 --recovery-reason")
+    if args.source_task_id and not TASK_ID_PATTERN.fullmatch(args.source_task_id):
+        parser.error("source-task-id 格式无效")
     if not TASK_ID_PATTERN.fullmatch(args.task_id):
         parser.error("--task-id 仅支持 1-100 位字母、数字、点、下划线和短横线")
     if not 0 <= args.iteration <= 100:
@@ -2014,6 +2406,10 @@ def main() -> None:
         "expand": build_expand,
     }
     workflow = builders[args.workflow_type](args, assets)
+    if getattr(args, 'reused_cards', None):
+        print(json.dumps({'status': 'reused', 'result_ref': args.reused_cards,
+              'next_action': {'action': 'collect', 'instruction': '复用已有卡片结果；先对账，只采集尚未执行者。'}}, ensure_ascii=False))
+        return
     output = save_workflow(workflow, Path(args.store_root).expanduser().resolve())
     if getattr(args, "decision_receipt", None) is not None:
         output["decision_receipt"] = args.decision_receipt
@@ -2023,6 +2419,13 @@ def main() -> None:
         "workflow_ref": output["workflow_ref"],
         "instruction": "编译成功。使用此引用执行既定工作流；不要重新评分或重新选择关键词。",
     }
+    receipt = workflow.get('input_summary', {}).get('reconciliation')
+    if receipt:
+        output['reconciliation'] = receipt
+        output['next_action']['instruction'] = '先确认 browser_embedded_status 无正在运行的动作，再执行；needs_restore 时按 recovery.md 决定恢复。'
+        if not any(receipt['remaining'].values()) and (receipt['completed'] or receipt['uncertain'] or receipt['failed']):
+            output['next_action'] = {'action': receipt['next_action'],
+                'instruction': '无需执行浏览器采集。复用 completed 的详情引用；效果不明者跳过并报告，按 recovery.md 继续。'}
     print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
 
 
